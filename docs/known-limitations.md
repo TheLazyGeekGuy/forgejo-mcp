@@ -6,14 +6,17 @@ v0.1.0 is the initial open-source release. It provides the complete Forgejo deve
 
 ## Compatibility
 
-- The API contract is locked to Forgejo `16.0.2+gitea-1.22.0` and the official mirror image `data.forgejo.org/forgejo/forgejo:16.0.2-rootless`.
-- Other Forgejo versions may work, but must be checked with `scripts/verify_forgejo_openapi.py` and the local integration suite before use.
+- The minimum supported release and locked production API contract are Forgejo `16.0.3+gitea-1.22.0`; the development default is the official `data.forgejo.org/forgejo/forgejo:16.0.3-rootless` image.
+- Forgejo 16.0.2 remains locked only as an OpenAPI and non-regression comparison baseline. It is not part of the published support range.
+- Later Forgejo versions may work, but must be checked with `scripts/verify_forgejo_openapi.py` and the local integration suite before use. Earlier versions are unsupported.
 - The server supports MCP Streamable HTTP with Bearer authentication. Client-specific configuration examples are not yet validated for every MCP client.
 
 ## Deployment
 
 - v0.1.0 supports Docker Compose deployment; the React Dashboard is built into the App image, so separate frontend and backend development servers are not part of the operator workflow.
 - A production TLS reverse-proxy example is not included in v0.1.0.
+- The reference Compose binds published ports to loopback by default. Any non-loopback bind requires an operator-provided TLS and network boundary.
+- Container base images and GitHub Actions are version-tagged rather than locked to immutable digests/commit SHAs; verify provenance and consider organization-level pinning for a higher-assurance deployment.
 - `/metrics` must be restricted by deployment networking or a reverse proxy before production exposure.
 - PostgreSQL backup/restore scripts, credential-key backup procedures and restore drills are deferred.
 - Upgrade, rollback and incident-response runbooks are deferred.
@@ -22,7 +25,7 @@ v0.1.0 is the initial open-source release. It provides the complete Forgejo deve
 ## Scaling and availability
 
 - The App is designed for a single replica in v0.1.0.
-- MCP and login rate-limit state is held in memory and is not shared across replicas.
+- MCP and login rate-limit state is bounded and expired keys are purged, but state is held in memory, resets on restart and is not shared across replicas.
 - Active MCP transport sessions are process-local and clients must reconnect after an App restart.
 - Graceful shutdown drains active tool invocations within a configured timeout, but a forced host or database failure can still interrupt work.
 
@@ -44,8 +47,8 @@ v0.1.0 is the initial open-source release. It provides the complete Forgejo deve
 ## Testing
 
 - Unit, integration and frontend quality checks are available.
-- The real App/PostgreSQL/Forgejo development-flow E2E runs locally with `scripts/test-full-docker-e2e.sh` and is not yet connected to workflow CI.
-- Failure-injection, security penetration testing, backup restore drills and multi-version Forgejo compatibility testing are deferred.
+- The real App/PostgreSQL/Forgejo development-flow E2E runs locally with `scripts/test-full-docker-e2e.sh` and in pull-request CI against the minimum supported Forgejo 16.0.3 release. The CI also exercises 16.0.2 as a non-supporting regression reference.
+- Failure-injection, security penetration testing and backup restore drills are deferred.
 
 ## Security boundary
 
@@ -53,6 +56,7 @@ v0.1.0 is the initial open-source release. It provides the complete Forgejo deve
 - Administrators can control tool availability but cannot inspect PAT or MCP token plaintext.
 - Loss of the credential encryption key makes stored Forgejo PAT ciphertext unusable; key backup guidance is deferred with the disaster-recovery work.
 - Possession of both the database and credential encryption key may expose stored PATs, so a future production deployment must protect them separately.
+- Repository migration host validation is defense in depth: Forgejo performs the final DNS resolution. Retain Forgejo's migration allowlist and network egress controls to contain DNS rebinding or public-name-to-private-address changes.
 
 ## Planned production-readiness work
 

@@ -12,15 +12,37 @@ You need:
 
 - the Forgejo MCP base URL from your administrator;
 - an active, verified Forgejo credential in the Dashboard;
-- an unexpired MCP token beginning with `fmcp_`;
+- either an OAuth-capable MCP client or an unexpired static MCP token beginning with `fmcp_`;
 - at least one tool granted globally, to your user and to that token;
 - an MCP client that supports Streamable HTTP and custom authorization headers.
 
 See the [user guide](user-guide.md) to create and maintain the credential and token.
 
-## Where to configure the token
+## OAuth 2.1 connection (preferred when supported)
 
-Each user must add the `fmcp_...` token created in the Dashboard to their own MCP client or agent configuration. Put it in the `Authorization` header of the Forgejo MCP server entry:
+Configure only the MCP resource URL in a client that supports OAuth authorization-code discovery:
+
+```text
+https://forgejo-mcp.example/mcp
+```
+
+The server advertises RFC 9728 protected-resource metadata and authorization-server metadata. The client dynamically registers as a public client or supplies an allowlisted Client ID Metadata Document, creates a PKCE S256 challenge, opens the Forgejo MCP login/consent page, and exchanges the one-time code for a short-lived access token and rotating refresh token. CIMD support is advertised only when the deployment has configured at least one exact CIMD origin; DCR remains available when that allowlist is empty.
+
+The user signs in with the **local Forgejo MCP Dashboard account** linked to their Forgejo identity and chooses an authorization duration on the consent page. The standard choices are 1, 7, 30 or 90 days, capped by deployment policy. Do not enter the Forgejo PAT in the OAuth page or in the MCP client. The PAT remains encrypted server-side and OAuth cannot add tools: each access token receives only the intersection of globally enabled tools and the user's existing allowance.
+
+Do not construct or paste an `/authorize` URL manually. Values such as `client_id`, `redirect_uri`, `code_challenge`, `state` and `resource` are generated and validated by the MCP client. A placeholder or stale authorization URL normally produces `Not Found`, `invalid_request` or `invalid_grant`.
+
+OAuth access tokens use the same `fmcp_...` opaque format internally, expire after one hour by default, and are never placed in query strings. The current Dashboard may show these short-lived OAuth access records alongside static tokens: an `expired` access record does not by itself mean that the authorization has ended. The MCP client refreshes access automatically until the selected absolute authorization expiry; rotation never pushes that date forward. Duplicate refreshes received inside the short concurrency grace receive the exact first replacement pair, not independent branches. A duplicate whose process-local recovery entry is unavailable is rejected without revoking the successful rotation. Reuse after the grace is treated as a replay and revokes the complete authorization. Revoking the active OAuth access record in the Dashboard also revokes the complete family.
+
+Some clients create one MCP connection manager per conversation and can submit the same refresh token a few seconds apart. Keep the default grace for clients that coordinate refreshes correctly. A deployment validated with such a multi-session client may raise `FMCP_OAUTH_REFRESH_TOKEN_REUSE_GRACE_SECONDS` up to 60 seconds; use `0` for strict replay handling. The recovery cache is bounded, ephemeral and process-local, so multi-replica deployments remain unsupported.
+
+Changing these settings does not revive a family that has already been revoked. If a client reports that Forgejo is no longer connected, remove or disconnect the stale connector and complete a new OAuth authorization.
+
+Client-specific OAuth behavior changes independently of this server. Generic DCR and allowlisted CIMD are covered by automated tests, including an Anthropic-shaped metadata document, but a named client should be considered production-approved only after its current release has completed a live connection test.
+
+## Static Bearer token connection
+
+For clients without OAuth support, each user adds the show-once `fmcp_...` token created in the Dashboard to their own MCP client or agent configuration. Put it in the `Authorization` header of the Forgejo MCP server entry:
 
 ```json
 {
@@ -76,6 +98,8 @@ This YAML is a field map, not a file that can be copied into every client. Follo
 
 Forgejo MCP rejects query-string authentication. The token must be sent as a Bearer token in the `Authorization` request header.
 
+Requests carrying an HTTP `Origin` header are rejected unless that exact normalized origin is present in the deployment's `FMCP_MCP_ALLOWED_ORIGINS` JSON list. Native MCP clients normally omit this header. Configure the allowlist only for an intentional browser-based client; wildcard origins are not supported.
+
 ## Confirm the connection
 
 After saving the configuration:
@@ -120,6 +144,16 @@ Check that:
 - the value starts with `Bearer ` followed by the complete `fmcp_...` token;
 - the token is not expired, disabled or revoked;
 - the client did not place the token in the URL query string.
+
+For OAuth, also confirm that OAuth is enabled and the access token has not expired or been replaced by refresh rotation. If the client sends an RFC 8707 `resource` parameter, it must be the exact advertised `/mcp` URL.
+
+### OAuth returns `invalid_request`
+
+Confirm that the client uses PKCE S256, its exact registered redirect URI and the single `mcp:tools` scope. An explicit RFC 8707 `resource` value must be the exact advertised `/mcp` URL; omission is supported because this authorization server exposes one fixed MCP resource and binds every issued token to it.
+
+### OAuth opens the login page but rejects the form
+
+The browser request must originate from the exact configured issuer origin. Restart the flow rather than reusing an old consent URL. Sign in with the local user account, not the administrator account and not the Forgejo account password.
 
 ### The connection succeeds but no tools are listed
 

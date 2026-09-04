@@ -12,13 +12,33 @@
 
 - 管理員提供的 Forgejo MCP base URL；
 - Dashboard 中有效且已驗證的 Forgejo credential；
-- 尚未到期、以 `fmcp_` 開頭的 MCP token；
+- 支援 OAuth 的 MCP client，或尚未到期、以 `fmcp_` 開頭的 static MCP token；
 - 至少一個已全域啟用、允許該使用者使用，並授權給該 token 的工具；
 - 支援 Streamable HTTP 與自訂 authorization header 的 MCP client。
 
 Credential 與 token 的建立及維護方式請參閱[使用者指南](user-guide.zh-TW.md)。
 
-## Token 要設定在哪裡
+## OAuth 2.1 連線（client 支援時建議使用）
+
+只需在支援 OAuth authorization-code discovery 的 client 設定 MCP resource URL：
+
+```text
+https://forgejo-mcp.example/mcp
+```
+
+Client 會使用 PKCE S256、公開 client registration、Forgejo MCP 本地登入與明確 consent，自動取得短效 access token 與 rotating refresh token。只有 deployment 至少設定一個精確 CIMD origin 時，server 才會公告 CIMD 支援；allowlist 為空時仍可使用 DCR。請使用與 Forgejo 身分連結的 **Forgejo MCP 本地帳號** 登入，並在 consent 頁面選擇 authorization 期限。標準選項為 1、7、30 或 90 天，並受 deployment policy 上限限制；不要在 OAuth 頁面或 client 輸入 Forgejo PAT。
+
+OAuth 不會增加權限。Access token 只取得「全域啟用工具」與「user allowance」的交集。不要手動組合或貼上 `/authorize` URL；`client_id`、redirect URI、challenge、state 與 resource 應由 client 產生並驗證。
+
+OAuth access token 預設一小時到期，client 會自動 refresh，直到選定的絕對 authorization 到期日；rotation 不會延長該日期。短暫 concurrency grace 內的重複 refresh 會取得第一次 rotation 的同一組 replacement token，而不會建立獨立分支；若 process-local recovery entry 不存在，重複請求會被拒絕，但已成功的 rotation 不會被撤銷。超過 grace 的 reuse 會被視為 replay 並撤銷整個 authorization。從 Dashboard 撤銷目前有效的 OAuth access record 也會撤銷整個 family。Dashboard 目前可能把這些短效 OAuth access records 與 static token 一起顯示，因此單一 access record 顯示 `expired` 不代表整個 authorization 已到期。
+
+部分 client 會為每個 conversation 建立獨立 MCP connection manager，因此可能在相隔數秒後送出相同 refresh token。能正確協調 refresh 的 client 應保留預設 grace。若 deployment 已實際驗證此類 multi-session client，可將 `FMCP_OAUTH_REFRESH_TOKEN_REUSE_GRACE_SECONDS` 提高至最多 60 秒；設為 `0` 可啟用嚴格 replay 處理。Recovery cache 有容量限制、生命週期短且僅存在單一 process，因此目前仍不支援 multi-replica deployment。
+
+修改這些設定不會復原已撤銷的 family。若 client 顯示 Forgejo 已中斷連線，請移除或中斷舊 connector，然後重新完成 OAuth authorization。
+
+Generic DCR 與 Anthropic-shaped CIMD metadata 已納入自動測試，但每個具名 client 的目前版本仍應完成 live connection test 後才正式核准。
+
+## Static Bearer token 要設定在哪裡
 
 是的，每位使用者都要把自己在 Dashboard 建立的 `fmcp_...` token，加入自己的 MCP client／agent 設定。Token 應放在該 MCP server entry 的 `Authorization` header：
 
@@ -76,6 +96,8 @@ headers:
 
 Forgejo MCP 不接受 query-string authentication。Token 必須以 Bearer token 放在 `Authorization` request header。
 
+如果 request 帶有 HTTP `Origin` header，該 origin 必須經過標準化後與 deployment 的 `FMCP_MCP_ALLOWED_ORIGINS` JSON 清單中某個值完全相同，否則會被拒絕。Native MCP client 通常不會傳送此 header。只在有意使用瀏覽器 MCP client 時才設定此 allowlist；不支援 wildcard origin。
+
 ## 確認連線
 
 儲存設定後：
@@ -120,6 +142,12 @@ Forgejo MCP 不接受 query-string authentication。Token 必須以 Bearer token
 - Value 以 `Bearer ` 開頭，後方為完整 `fmcp_...` token；
 - Token 尚未到期、停用或撤銷；
 - Client 沒有把 token 放進 URL query string。
+
+OAuth 使用時，還要確認 OAuth 已啟用，且 access token 沒有因 refresh rotation 被替換。如果 client 傳送 RFC 8707 `resource` parameter，其值必須是 server 公告的精確 `/mcp` URL。
+
+### OAuth 回傳 `invalid_request`
+
+確認 client 使用 PKCE S256、精確註冊的 redirect URI與唯一的 `mcp:tools` scope。明確提供的 RFC 8707 `resource` 必須是 server 公告的精確 `/mcp` URL；省略 resource 也受支援，因為本 server 只有一個固定 MCP resource，且所有 token 都會綁定至該 resource。
 
 ### 連線成功但沒有列出工具
 

@@ -6,13 +6,14 @@ Forgejo MCP 是一套自架的 [Model Context Protocol](https://modelcontextprot
 
 每位使用者透過自己的 scoped Forgejo personal access token（PAT）操作 Forgejo；管理員則決定哪些 MCP 工具可全域使用、可提供給特定使用者，以及可授權給只顯示一次的 MCP token。
 
-> **v0.1.0 是第一個開源版本。** 核心流程已使用 Forgejo 16.0.2 完成本地驗證，但部分 production deployment 能力尚未完整。正式使用前請先閱讀[已知限制](docs/known-limitations.zh-TW.md)。
+> **v0.1.0 是第一個開源版本。** 最低支援版本為 Forgejo 16.0.3。Forgejo 16.0.2 僅保留作為測試比較基準，不屬於正式支援範圍。部分 production deployment 能力尚未完整；正式使用前請先閱讀[已知限制](docs/known-limitations.zh-TW.md)。
 
 ## 能做什麼
 
 - 提供 50 個工具，涵蓋 repository、組織 repository 建立、migration 與 pull mirror 管理、git tree、branch、commit、label、milestone、Issue、pull request、review、Actions run、job、log、artifact、tag 與 release。
 - 在 Forgejo 原有權限之外，增加全域、使用者與 token 三層工具授權。
 - 使用者透過已驗證且限制權限範圍的 Forgejo PAT，以自己的 Forgejo 身分操作。
+- 可選擇啟用 OAuth 2.1 authorization code、PKCE S256、可選 1/7/30/90 天的 consent、短效 access token 與 rotating refresh token；預設關閉。
 - 使用 AES-256-GCM 加密儲存 PAT，MCP token 只顯示一次。
 - 透過 Web Dashboard 管理 Forgejo 連線、使用者、權限及稽核紀錄。
 - 提供遮蔽敏感資訊的 invocation audit、structured logs、health endpoints 與 Prometheus metrics。
@@ -32,18 +33,18 @@ Forgejo MCP 的定位不只是另一個 Forgejo API wrapper，而是公司 AI cl
 ## 運作方式
 
 ```text
-MCP client ──Bearer token──> Forgejo MCP /mcp ──user PAT──> Forgejo API
-                                  │
-Web Dashboard ──admin/user──> 權限、credential 與 audit records
-                                  │
-                              PostgreSQL
+MCP client ──OAuth 2.1 或 Bearer──> Forgejo MCP /mcp ──user PAT──> Forgejo API
+                                        │
+Web Dashboard ──admin/user login──> 權限、credential 與 audit records
+                                        │
+                                    PostgreSQL
 ```
 
 Forgejo MCP 不會取代 Forgejo 本身的授權。工具必須已全域啟用、允許該使用者使用、授權給該 MCP token，並且使用者的 Forgejo 帳號與 PAT 也有對應權限，才會出現在 MCP client 中。
 
 ## 系統需求
 
-- 符合已鎖定 Forgejo 16.0.2 API contract 的既有 Forgejo instance
+- 符合已鎖定 API contract 的 Forgejo 16.0.3 instance；更新版本必須先完成相容性驗證
 - Docker Engine 與 Docker Compose
 - 用於產生本地 secrets 的 OpenSSL
 
@@ -55,12 +56,17 @@ v0.1.0 支援的部署方式會把 React Dashboard build 進 App image，並一�
 
 ```bash
 cp deploy/compose.example.env deploy/.env
-# 繼續前請編輯 deploy/.env 並更換 POSTGRES_PASSWORD。
 
 mkdir -p deploy/secrets
 openssl rand -base64 32 > deploy/secrets/admin_password
 openssl rand -base64 32 > deploy/secrets/credential_key
-chmod 600 deploy/secrets/admin_password deploy/secrets/credential_key
+postgres_password="$(openssl rand -hex 32)"
+printf '%s\n' "$postgres_password" > deploy/secrets/postgres_password
+printf 'postgresql+asyncpg://forgejo_mcp:%s@postgres:5432/forgejo_mcp\n' \
+  "$postgres_password" > deploy/secrets/database_url
+unset postgres_password
+chmod 600 deploy/secrets/admin_password deploy/secrets/credential_key \
+  deploy/secrets/postgres_password deploy/secrets/database_url
 
 docker compose --env-file deploy/.env -f deploy/compose.yaml up --build -d
 ```
@@ -78,6 +84,12 @@ curl http://127.0.0.1:8000/health/ready
 - 密碼：`deploy/secrets/admin_password` 內的值
 
 登入後應立刻更換 bootstrap password。直接使用 localhost HTTP 時需要設定 `FMCP_COOKIE_SECURE=false`；前方有 HTTPS 時則應維持 secure cookie。
+
+Production 啟動時也必須設定 `FMCP_FORGEJO_ALLOWED_BASE_URLS`，其值為包含可信 Forgejo base URL 的 JSON 清單（例如 `["https://git.example.com"]`）。任何環境中的空清單都不允許 Forgejo 連線。這個由部署管理的固定值可防止 Dashboard 管理員把使用者 PAT 驗證導向其他伺服器。請維持 `FMCP_ALLOW_UNVERIFIED_FORGEJO_TLS=false`；關閉 certificate verification 需要額外的 deployment opt-in。以瀏覽器連接 MCP 時，還必須把精確的 origin 加入 `FMCP_MCP_ALLOWED_ORIGINS`；一般 MCP client 不會傳送 `Origin` header。
+
+參考 Compose 預設只在 `127.0.0.1` 發佈 App。Public TLS 應由可信 reverse proxy 終止。若 rate limiting 需要 proxy 傳入的 client IP，請把 `FMCP_TRUSTED_PROXY_CIDRS` 限制為精確的 proxy network；否則 App 會忽略 forwarded headers。
+
+OAuth 預設關閉；啟用後也不會要求或新增 Forgejo PAT scope。Issuer 必須是公開 HTTPS origin，resource 必須是同一 origin 的 `/mcp`。除非 client 確實使用 CIMD，否則應維持空白 allowlist。
 
 Logs、停止服務、清除資料、常見啟動錯誤，以及選用的本地 Forgejo profile，請參閱[快速入門](docs/getting-started.zh-TW.md)。
 
@@ -98,7 +110,7 @@ Logs、停止服務、清除資料、常見啟動錯誤，以及選用的本地 
 
 ## MCP 連線
 
-Forgejo MCP 使用需要驗證的 MCP Streamable HTTP：
+Forgejo MCP 使用需要驗證的 MCP Streamable HTTP。支援 OAuth 2.1 的 client 可由 `/mcp` 自動 discovery；既有 static Bearer token 仍完整相容：
 
 ```text
 URL:           https://forgejo-mcp.example/mcp
@@ -106,7 +118,7 @@ Transport:     Streamable HTTP
 Authorization: Bearer fmcp_...
 ```
 
-MCP token 只會顯示一次，請存放在 client 的 secret storage；系統不接受 query-string token。欄位對應、連線確認與問題排查方式請參閱 [MCP client 設定](docs/mcp-client-configuration.zh-TW.md)。
+OAuth client 會使用本地 Forgejo MCP 帳號登入並提供有期限的明確 consent；它不會取得 Forgejo PAT。Static MCP token 只會顯示一次，請存放在 client 的 secret storage；系統不接受 query-string token。欄位對應、連線確認與問題排查方式請參閱 [MCP client 設定](docs/mcp-client-configuration.zh-TW.md)。
 
 ## 文件
 
@@ -116,9 +128,12 @@ MCP token 只會顯示一次，請存放在 client 的 secret storage；系統�
 | 設定 Forgejo、使用者與權限 | [管理員指南](docs/admin-guide.zh-TW.md) |
 | 建立 PAT 與 MCP token | [使用者指南](docs/user-guide.zh-TW.md) |
 | 連接 MCP client | [MCP client 設定](docs/mcp-client-configuration.zh-TW.md) |
+| 啟用與審查 OAuth 2.1 | [OAuth 2.1 security and operations](docs/security/oauth-2.1.md) |
 | 確認目前限制 | [已知限制](docs/known-limitations.zh-TW.md) |
 | 查詢工具 input 與行為 | [v1 工具目錄](docs/tools/v1-tool-catalog.md) |
 | 檢視 credential 處理方式 | [Credential security](docs/security/credentials.md) |
+| 閱讀獨立安全稽核與修復結果 | [External audit, 2026-09-02（法文）](docs/security/audit-externe-2026-09-02.fr.md) |
+| 準備獨立審查 | [Third-party review handoff](docs/security/third-party-review.md) |
 
 ## 開發與驗證
 
@@ -140,7 +155,7 @@ npm run typecheck --prefix frontend
 npm run build --prefix frontend
 ```
 
-Forgejo image 固定為官方 mirror `data.forgejo.org/forgejo/forgejo:16.0.2-rootless`。可以使用下列指令驗證其他 instance 的 Swagger contract：
+Forgejo 開發預設 image 與最低支援版本為官方 mirror `data.forgejo.org/forgejo/forgejo:16.0.3-rootless`。專案鎖定支援版本 16.0.3 的 Swagger checksum，並保留 16.0.2 checksum 供歷史比較。可以使用下列指令驗證 instance contract：
 
 ```bash
 uv run python scripts/verify_forgejo_openapi.py https://forgejo.example/swagger.v1.json

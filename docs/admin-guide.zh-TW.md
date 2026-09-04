@@ -51,11 +51,19 @@ MCP client 可以使用該工具
 - 使用 HTTPS；
 - URL 不得包含 credential、query string 或 fragment；
 - 確保 App 可以連到 Forgejo API；
-- 維持 `FMCP_ALLOW_INSECURE_FORGEJO_HTTP=false`。
+- 用 `FMCP_FORGEJO_ALLOWED_BASE_URLS` 在 Dashboard 之外固定精確 URL；
+- 維持 `FMCP_ALLOW_INSECURE_FORGEJO_HTTP=false`；
+- 維持 `FMCP_ALLOW_UNVERIFIED_FORGEJO_TLS=false`。
 
 只有明確啟用的本地測試 profile 才允許 HTTP。
 
-v0.1.0 已依 Forgejo `16.0.2+gitea-1.22.0` contract 測試。連接其他版本前請先閱讀[已知限制](known-limitations.zh-TW.md)。
+Production 在 `FMCP_FORGEJO_ALLOWED_BASE_URLS` JSON 清單為空時會拒絕啟動；development 與 test 的空清單同樣不允許任何 outbound Forgejo 連線。Dashboard 只能測試與儲存設定清單內的 URL，藉此防止本地管理員帳號受侵後將 PAT 驗證導向攻擊者控制的 endpoint。
+
+參考 Compose 預設只在 loopback 發佈 App。Public deployment 應放在 HTTPS reverse proxy 後方，並盡可能讓 App 留在 private Docker network。若 login、invitation 與 OAuth registration 的 rate limit 需要 proxy 提供 client IP，只能把 proxy 的精確 network 加入 `FMCP_TRUSTED_PROXY_CIDRS`。其他 peer 傳來的 `X-Forwarded-For` 會被忽略；請勿使用 `0.0.0.0/0` 或啟用 Uvicorn unrestricted proxy-header trust。
+
+Repository migration 只接受帶 host 的 `http`、`https`、`ssh` 與 `git` URL。預設會拒絕本地路徑、URL credential、query string、fragment，以及 private/special host。只有在必須使用可信的私有 migration source 時才設定 `FMCP_MIGRATION_ALLOW_PRIVATE_HOSTS=true`，並維持 Forgejo 自身的 migration allow/deny policy。
+
+v0.1.0 的最低支援版本為 Forgejo `16.0.3+gitea-1.22.0`。Forgejo 16.0.2 僅保留作為比較基準，不是受支援的部署目標。連接更新版本前請先閱讀[已知限制](known-limitations.zh-TW.md)。
 
 ## 3. 設定全域工具
 
@@ -104,7 +112,28 @@ Least privilege 建議：
 
 管理員可以查看狀態與 metadata，但不能查看 PAT 或 MCP token 明文。
 
-## 7. 檢查稽核紀錄
+## 7. 可選的 OAuth 2.1 authorization
+
+OAuth 預設關閉，既有 static Bearer authentication 不受影響。OAuth 不會改變 Forgejo PAT scope，也不能繞過 global/user permission ceiling。
+
+```dotenv
+FMCP_OAUTH_ENABLED=true
+FMCP_OAUTH_ISSUER_URL=https://forge-mcp.example.com
+FMCP_OAUTH_RESOURCE_URL=https://forge-mcp.example.com/mcp
+FMCP_OAUTH_CIMD_ALLOWED_ORIGINS=[]
+FMCP_OAUTH_ACCESS_TOKEN_TTL_SECONDS=3600
+FMCP_OAUTH_REFRESH_TOKEN_TTL_DAYS=30
+FMCP_OAUTH_REFRESH_TOKEN_MAX_TTL_DAYS=90
+FMCP_OAUTH_REFRESH_TOKEN_REUSE_GRACE_SECONDS=10
+```
+
+Issuer 必須是無 path 的公開 HTTPS origin；resource 必須是同一 origin 後接 `/mcp`。DCR-only 環境請保持 CIMD allowlist 為空。只有經審查且以 HTTPS metadata URL 作為 client ID 的 client，才加入其精確 origin；不支援 wildcard、redirect、private address 或非 HTTPS CIMD fetch。
+
+Access token 維持短效，並由 MCP client 自動更新。`FMCP_OAUTH_REFRESH_TOKEN_TTL_DAYS` 是 consent 頁面的預設 authorization 期限，`FMCP_OAUTH_REFRESH_TOKEN_MAX_TTL_DAYS` 則限制可選的 1、7、30 與 90 天。Refresh rotation 絕不延長選定的絕對到期日。在短暫 reuse grace 內，重複請求會取得第一次 rotation 的同一組 replacement token，而不會建立獨立 family 分支；若 process-local recovery entry 不存在，重複請求會 fail closed，但不撤銷已成功的 rotation。超過 grace 的舊 token replay 仍會撤銷整個 family。若已驗證 multi-session client 的 refresh 延遲超過預設 10 秒，可將 deployment grace 設為最多 60 秒；設為 `0` 可啟用嚴格 replay 處理。
+
+停用 `FMCP_OAUTH_ENABLED` 會立即使 OAuth access token 無法使用，但不影響 static Bearer token。Database downgrade 會先刪除 OAuth 建立的 MCP access records，再移除 linkage，避免它們被誤認為 static token。完整威脅分析請參閱 [OAuth 2.1 security and operations](security/oauth-2.1.md)。
+
+## 8. 檢查稽核紀錄
 
 Tool invocation records 包含：
 
@@ -112,7 +141,7 @@ Tool invocation records 包含：
 - Forgejo username；
 - tool name、version 與 risk；
 - authorization decision 與 denial reason；
-- 遮蔽後的 arguments 與 extracted target；
+- 遮蔽後的 arguments，以及獨立遮蔽並限制長度的 extracted target；
 - status、duration 與 bounded result summary；
 - 不含 credential 明文的 error classification。
 
@@ -120,11 +149,14 @@ Tool invocation records 包含：
 
 Forgejo MCP audit records 用來補充 Forgejo repository history 與 Forgejo 本身的 audit，不是取代它們。
 
-## 8. 停用或撤銷存取
+Remote URL 中的 credential 會在 persistence 前從 arguments 與 extracted target 移除。Multi-file commit 的內容只會記錄 byte length 與 SHA-256 digest；invocation arguments 不會保留 file content。
+
+## 9. 停用或撤銷存取
 
 請採取最小但有效的處置：
 
 - 只有單一 client 或 device 受影響時，撤銷該 MCP token；
+- 撤銷 OAuth access token 時，會同時撤銷整個 refresh-token family；
 - 只需移除一項能力時，移除 token grant；
 - 使用者角色改變時，移除 user allowance；
 - PAT 失效或外洩時，停用 Forgejo credential；
