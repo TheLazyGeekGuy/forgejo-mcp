@@ -230,3 +230,109 @@ def test_batch_tool_authorization_loads_one_permission_snapshot() -> None:
         permissions.grant_names.assert_awaited_once_with(token_id)
 
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {},
+        {"attempt": 2},
+        {"max_bytes": 1, "from_end": False, "offset": 0},
+        {"max_bytes": 1024 * 1024, "offset": 10 * 1024 * 1024, "grep": "g" * 256},
+        {"grep": ""},
+    ],
+)
+def test_action_job_log_schema_accepts_window_arguments(arguments: dict[str, object]) -> None:
+    schema = get_tool("forgejo_get_action_job_log").input_schema
+
+    jsonschema.validate(
+        instance={"owner": "owner", "repo": "repo", "job_id": 51, **arguments}, schema=schema
+    )
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["max_bytes"]["default"] == 64 * 1024
+    assert schema["properties"]["from_end"]["default"] is True
+    assert schema["properties"]["offset"]["default"] == 0
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"max_bytes": 0},
+        {"max_bytes": 1024 * 1024 + 1},
+        {"max_bytes": "64"},
+        {"from_end": "yes"},
+        {"offset": -1},
+        {"grep": "g" * 257},
+        {"limit": 10},
+    ],
+)
+def test_action_job_log_schema_rejects_out_of_range_window_arguments(
+    arguments: dict[str, object],
+) -> None:
+    validator = jsonschema.Draft202012Validator(get_tool("forgejo_get_action_job_log").input_schema)
+
+    assert list(
+        validator.iter_errors({"owner": "owner", "repo": "repo", "job_id": 51, **arguments})
+    )
+
+
+def test_action_log_output_schemas_describe_windows_and_index_entries() -> None:
+    job_log = get_tool("forgejo_get_action_job_log").output_schema
+    run_logs = get_tool("forgejo_get_action_run_logs").output_schema
+    file_schema = run_logs["properties"]["files"]["items"]
+
+    assert set(job_log["required"]) == {
+        "job_id",
+        "attempt",
+        "size",
+        "sha256",
+        "content",
+        "offset",
+        "returned_bytes",
+        "truncated",
+    }
+    assert set(file_schema["required"]) == {"name", "size", "sha256"}
+    assert {"content", "offset", "returned_bytes", "truncated"} <= set(file_schema["properties"])
+    assert file_schema["additionalProperties"] is False
+    jsonschema.validate(
+        instance={"name": "a.log", "size": 3, "sha256": "0" * 64}, schema=file_schema
+    )
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {},
+        {"include_content": True},
+        {"include_content": True, "max_bytes_per_file": 1},
+        {"include_content": False, "max_bytes_per_file": 1024 * 1024},
+    ],
+)
+def test_action_run_logs_schema_accepts_index_arguments(arguments: dict[str, object]) -> None:
+    schema = get_tool("forgejo_get_action_run_logs").input_schema
+
+    jsonschema.validate(
+        instance={"owner": "owner", "repo": "repo", "run_id": 42, **arguments}, schema=schema
+    )
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["include_content"]["default"] is False
+    assert schema["properties"]["max_bytes_per_file"]["default"] == 64 * 1024
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"include_content": "true"},
+        {"max_bytes_per_file": 0},
+        {"max_bytes_per_file": 1024 * 1024 + 1},
+        {"max_bytes": 10},
+    ],
+)
+def test_action_run_logs_schema_rejects_invalid_arguments(arguments: dict[str, object]) -> None:
+    validator = jsonschema.Draft202012Validator(
+        get_tool("forgejo_get_action_run_logs").input_schema
+    )
+
+    assert list(
+        validator.iter_errors({"owner": "owner", "repo": "repo", "run_id": 42, **arguments})
+    )

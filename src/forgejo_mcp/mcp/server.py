@@ -35,6 +35,7 @@ from forgejo_mcp.auth.mcp_bearer import (
 from forgejo_mcp.auth.rate_limit import MultiScopeRateLimiter
 from forgejo_mcp.authorization.tools import ToolAuthorizationDecision
 from forgejo_mcp.config import Settings, normalize_http_origin
+from forgejo_mcp.forgejo.client import DEFAULT_ACTION_LOG_WINDOW_BYTES
 from forgejo_mcp.observability.context import (
     reset_invocation_id,
     reset_user_id,
@@ -621,10 +622,20 @@ async def _execute_tool(
             **common,
             job_id=cast(int, arguments["job_id"]),
             attempt=cast(int | None, arguments.get("attempt")),
+            max_bytes=cast(int, arguments.get("max_bytes", DEFAULT_ACTION_LOG_WINDOW_BYTES)),
+            from_end=cast(bool, arguments.get("from_end", True)),
+            offset=cast(int, arguments.get("offset", 0)),
+            grep=cast(str | None, arguments.get("grep")),
         )
     if name == "forgejo_get_action_run_logs":
         return await tools.get_action_run_logs(
-            user_id, **common, run_id=cast(int, arguments["run_id"])
+            user_id,
+            **common,
+            run_id=cast(int, arguments["run_id"]),
+            include_content=cast(bool, arguments.get("include_content", False)),
+            max_bytes_per_file=cast(
+                int, arguments.get("max_bytes_per_file", DEFAULT_ACTION_LOG_WINDOW_BYTES)
+            ),
         )
     if name == "forgejo_list_action_run_artifacts":
         return _page_result(
