@@ -58,6 +58,8 @@ MAX_JSON_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_FILE_CONTENT_BYTES = 1024 * 1024
 MAX_DIFF_BYTES = 2 * 1024 * 1024
 MAX_ACTION_LOG_BYTES = 1024 * 1024
+DEFAULT_ACTION_LOG_WINDOW_BYTES = 64 * 1024
+MAX_ACTION_LOG_GREP_LENGTH = 256
 MAX_ACTION_LOG_ARCHIVE_BYTES = 10 * 1024 * 1024
 MAX_ACTION_LOG_FILES = 100
 MAX_FORGEJO_RESPONSE_BYTES = MAX_ACTION_LOG_ARCHIVE_BYTES
@@ -1319,7 +1321,14 @@ class ForgejoClient:
         repo: str,
         job_id: int,
         attempt: int | None,
+        max_bytes: int = DEFAULT_ACTION_LOG_WINDOW_BYTES,
+        from_end: bool = True,
+        offset: int = 0,
+        grep: str | None = None,
     ) -> dict[str, Any]:
+        window_bytes = _log_window_size(max_bytes, "max_bytes")
+        window_offset = _log_window_offset(offset)
+        needle = _log_grep(grep)
         params = {"attempt": _positive_id(attempt, "attempt")} if attempt is not None else None
         response = await self._request(
             method="GET",
@@ -1335,14 +1344,19 @@ class ForgejoClient:
             accept="text/plain",
         )
         content = response.content
-        bounded = content[:MAX_ACTION_LOG_BYTES]
+        source = _grep_log_lines(content, needle) if needle is not None else content
+        window, start = _log_window(
+            source, max_bytes=window_bytes, from_end=from_end, offset=window_offset
+        )
         return {
             "job_id": job_id,
             "attempt": attempt,
             "size": len(content),
             "sha256": hashlib.sha256(content).hexdigest(),
-            "content": bounded.decode("utf-8", errors="replace"),
-            "truncated": len(content) > len(bounded),
+            "content": window.decode("utf-8", errors="replace"),
+            "offset": start,
+            "returned_bytes": len(window),
+            "truncated": len(window) < len(source),
         }
 
     async def get_action_run_logs(
@@ -1354,7 +1368,10 @@ class ForgejoClient:
         owner: str,
         repo: str,
         run_id: int,
+        include_content: bool = False,
+        max_bytes_per_file: int = DEFAULT_ACTION_LOG_WINDOW_BYTES,
     ) -> dict[str, Any]:
+        per_file_bytes = _log_window_size(max_bytes_per_file, "max_bytes_per_file")
         response = await self._request(
             method="GET",
             endpoint=self._repo_endpoint(
@@ -1378,6 +1395,7 @@ class ForgejoClient:
         remaining = MAX_ACTION_LOG_BYTES
         files_truncated = False
         try:
+            # The archive is only ever inspected in memory; entries are never extracted to disk.
             with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
                 entries = [entry for entry in bundle.infolist() if not entry.is_dir()]
                 for entry in entries[:MAX_ACTION_LOG_FILES]:
@@ -1386,19 +1404,32 @@ class ForgejoClient:
                             "Forgejo action run logs contain an oversized file"
                         )
                     content = bundle.read(entry)
-                    bounded = content[:remaining]
-                    files.append(
+                    item: dict[str, Any] = {
+                        "name": entry.filename,
+                        "size": len(content),
+                        "sha256": hashlib.sha256(content).hexdigest(),
+                    }
+                    if not include_content:
+                        files.append(item)
+                        continue
+                    window, start = _log_window(
+                        content,
+                        max_bytes=min(per_file_bytes, remaining),
+                        from_end=True,
+                        offset=0,
+                    )
+                    item.update(
                         {
-                            "name": entry.filename,
-                            "size": len(content),
-                            "sha256": hashlib.sha256(content).hexdigest(),
-                            "content": bounded.decode("utf-8", errors="replace"),
-                            "truncated": len(content) > len(bounded),
+                            "content": window.decode("utf-8", errors="replace"),
+                            "offset": start,
+                            "returned_bytes": len(window),
+                            "truncated": len(window) < len(content),
                         }
                     )
-                    remaining -= len(bounded)
+                    files.append(item)
+                    remaining -= len(window)
                     if remaining == 0:
-                        files_truncated = len(entries) > len(files) or len(content) > len(bounded)
+                        files_truncated = len(entries) > len(files) or len(content) > len(window)
                         break
                 files_truncated = files_truncated or len(entries) > MAX_ACTION_LOG_FILES
         except (zipfile.BadZipFile, RuntimeError, OSError) as error:
@@ -2328,6 +2359,78 @@ def _number(value: int) -> int:
     if isinstance(value, bool) or value < 1:
         raise ValidationFailed("number must be a positive integer")
     return value
+
+
+def _log_window_size(value: int, label: str) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= MAX_ACTION_LOG_BYTES
+    ):
+        raise ValidationFailed(f"{label} must be between 1 and {MAX_ACTION_LOG_BYTES} bytes")
+    return value
+
+
+def _log_window_offset(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValidationFailed("offset must be a non-negative integer")
+    return value
+
+
+def _log_grep(value: str | None) -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or len(value) > MAX_ACTION_LOG_GREP_LENGTH:
+        raise ValidationFailed(f"grep must be at most {MAX_ACTION_LOG_GREP_LENGTH} characters")
+    return value
+
+
+def _grep_log_lines(content: bytes, needle: str) -> bytes:
+    """Keep only lines containing ``needle`` (case-insensitive), each prefixed by its number."""
+    folded = needle.casefold()
+    lines = content.decode("utf-8", errors="replace").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    matches = [
+        f"{number}: {line}\n"
+        for number, line in enumerate(lines, start=1)
+        if folded in line.casefold()
+    ]
+    return "".join(matches).encode("utf-8")
+
+
+def _log_window(source: bytes, *, max_bytes: int, from_end: bool, offset: int) -> tuple[bytes, int]:
+    """Return at most ``max_bytes`` of ``source`` and the byte offset where the window starts.
+
+    ``offset`` counts from the end when ``from_end`` is true, from the start otherwise. The
+    window is aligned on line boundaries whenever a newline is available inside it, so the
+    returned text neither starts nor ends in the middle of a line unless the log has no
+    usable newline there.
+    """
+    total = len(source)
+    if from_end:
+        end = max(total - offset, 0)
+        if 0 < end < total and source[end - 1 : end] != b"\n":
+            newline = source.rfind(b"\n", max(end - max_bytes, 0), end)
+            if newline != -1:
+                end = newline + 1
+        start = max(end - max_bytes, 0)
+        if start > 0 and source[start - 1 : start] != b"\n":
+            newline = source.find(b"\n", start, end)
+            if newline != -1 and newline + 1 < end:
+                start = newline + 1
+    else:
+        start = min(offset, total)
+        if 0 < start < total and source[start - 1 : start] != b"\n":
+            newline = source.find(b"\n", start, min(start + max_bytes, total))
+            if newline != -1 and newline + 1 < total:
+                start = newline + 1
+        end = min(start + max_bytes, total)
+        if end < total and source[end - 1 : end] != b"\n":
+            newline = source.rfind(b"\n", start, end)
+            if newline != -1:
+                end = newline + 1
+    return source[start:end], start
 
 
 def _positive_id(value: int, label: str) -> int:
