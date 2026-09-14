@@ -58,6 +58,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Changed
 
+- Window `forgejo_get_pull_request_diff` output: optional `paths` (1–50 exact file paths, renames match either name) keep only the matching `diff --git` sections, and `max_bytes` (default 64 KiB) plus `offset` page through the filtered diff on line boundaries. The result now reports `total_size`, `offset`, `returned_bytes`, `truncated`, `files_included` and `files_missing`; `sha256` still covers the complete diff and the 2 MiB input bound is unchanged.
 - Batch MCP tool-discovery authorization against one permission snapshot, eliminating repeated registry writes and per-tool SQL reloads without changing deny-by-default decisions.
 - Treat an empty optional repository-content path as the repository root, avoiding repeated validation failures from MCP clients that serialize omitted strings as empty values.
 - Defined Forgejo 16.0.3 as the minimum supported release; the locked 16.0.2 contract and E2E run remain comparison evidence only and do not extend the published support range.

@@ -390,9 +390,12 @@ Forgejo v16 compare response 不提供可靠的 ahead/behind 或 resolved base/h
 - **Risk:** `read-sensitive`
 - **Forgejo:** `GET /api/v1/repos/{owner}/{repo}/pulls/{index}.diff?binary=false`
 - **預期最小 scope:** `read:repository`
-- **Input:** `owner`、`repo`、`number`。
-- **Output:** `{ number, format: "diff", size, sha256, content }`。
-- Diff 超過 2 MiB 時拒絕，不回傳部分 diff。
+- **Input:** `owner`、`repo`、`number`、optional `paths`（1–50 個 file path，與 `forgejo_get_file_content` 的 `path` 同一 schema）、`max_bytes`（1–2,097,152，預設 65,536）、`offset`（≥ 0，以 filtered diff 的 byte 為單位）。
+- **Output:** `{ number, format: "diff", size, total_size, offset, returned_bytes, truncated, files_included, files_missing, sha256, content }`。
+- 建議先呼叫 `forgejo_get_pull_request_files` 列出變更路徑，再只索取需要的 `paths`。
+- `paths` 以 `diff --git a/<p> b/<p>` section 為單位做精確比對（normalize 後、不支援 glob）；rename 以舊名或新名皆可命中。`files_included` 為實際命中的路徑、`files_missing` 為 diff 中不存在的路徑；沒有 `paths` 時回傳整個 diff，`files_included` 列出所有 section 路徑。
+- `size` 為 filtered diff 的大小、`total_size` 與 `sha256` 永遠描述完整 diff。`content` 為自 `offset` 起最多 `max_bytes` 的視窗，截斷時切在行邊界（單行超過視窗時切在 UTF-8 字元邊界）；`truncated` 為 true 時以 `offset + returned_bytes` 續讀。
+- 完整 diff 超過 2 MiB 時仍然拒絕（`MAX_DIFF_BYTES` 不變，過濾在接收之後才發生），不回傳部分 diff。
 - Audit 只保存 number、size、SHA-256，不保存 diff content。
 
 ### 4.15 `forgejo_get_git_tree`
