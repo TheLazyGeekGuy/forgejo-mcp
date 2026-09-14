@@ -35,6 +35,7 @@ from forgejo_mcp.auth.mcp_bearer import (
 from forgejo_mcp.auth.rate_limit import MultiScopeRateLimiter
 from forgejo_mcp.authorization.tools import ToolAuthorizationDecision
 from forgejo_mcp.config import Settings, normalize_http_origin
+from forgejo_mcp.forgejo.client import DEFAULT_DIFF_WINDOW_BYTES
 from forgejo_mcp.observability.context import (
     reset_invocation_id,
     reset_user_id,
@@ -494,12 +495,23 @@ async def _execute_tool(
         )
     if name == "forgejo_get_pull_request_diff":
         diff_result = await tools.get_pull_request_diff(
-            user_id, **common, number=cast(int, arguments["number"])
+            user_id,
+            **common,
+            number=cast(int, arguments["number"]),
+            paths=cast(list[str] | None, arguments.get("paths")),
+            max_bytes=cast(int, arguments.get("max_bytes", DEFAULT_DIFF_WINDOW_BYTES)),
+            offset=cast(int, arguments.get("offset", 0)),
         )
         return {
             "number": diff_result.number,
             "format": diff_result.format,
             "size": diff_result.size,
+            "total_size": diff_result.total_size,
+            "offset": diff_result.offset,
+            "returned_bytes": diff_result.returned_bytes,
+            "truncated": diff_result.truncated,
+            "files_included": diff_result.files_included,
+            "files_missing": diff_result.files_missing,
             "sha256": diff_result.sha256,
             "content": diff_result.content,
         }

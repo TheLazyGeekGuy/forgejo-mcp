@@ -57,6 +57,8 @@ MAX_USER_RESPONSE_BYTES = 256 * 1024
 MAX_JSON_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_FILE_CONTENT_BYTES = 1024 * 1024
 MAX_DIFF_BYTES = 2 * 1024 * 1024
+DEFAULT_DIFF_WINDOW_BYTES = 64 * 1024
+MAX_DIFF_PATHS = 50
 MAX_ACTION_LOG_BYTES = 1024 * 1024
 MAX_ACTION_LOG_ARCHIVE_BYTES = 10 * 1024 * 1024
 MAX_ACTION_LOG_FILES = 100
@@ -98,8 +100,27 @@ class DiffContent:
     number: int
     format: str
     size: int
+    total_size: int
     sha256: str
     content: str
+    offset: int
+    returned_bytes: int
+    truncated: bool
+    files_included: list[str]
+    files_missing: list[str]
+
+
+@dataclass(frozen=True)
+class DiffSection:
+    """One ``diff --git`` section of a unified diff.
+
+    ``path`` is the post-image (``b/``) path; ``paths`` also carries the pre-image
+    (``a/``) path so a rename is found under either name.
+    """
+
+    text: str
+    path: str
+    paths: frozenset[str]
 
 
 def normalize_base_url(value: str) -> str:
@@ -853,7 +874,12 @@ class ForgejoClient:
         owner: str,
         repo: str,
         number: int,
+        paths: list[str] | None = None,
+        max_bytes: int = DEFAULT_DIFF_WINDOW_BYTES,
+        offset: int = 0,
     ) -> DiffContent:
+        requested = _diff_paths(paths) if paths is not None else None
+        _diff_window_bounds(max_bytes, offset)
         response = await self._request(
             method="GET",
             endpoint=self._repo_endpoint(base_url, owner, repo, f"pulls/{_number(number)}.diff"),
@@ -873,12 +899,35 @@ class ForgejoClient:
             raise ExternalServiceUnavailable(
                 "Forgejo returned an invalid pull request diff"
             ) from error
+        sections = split_diff_sections(content)
+        if requested is None:
+            filtered = content
+            files_included = [section.path for section in sections]
+            files_missing: list[str] = []
+        else:
+            wanted = set(requested)
+            filtered = "".join(section.text for section in sections if section.paths & wanted)
+            found = frozenset().union(*(section.paths for section in sections)) & wanted
+            files_included = [path for path in requested if path in found]
+            files_missing = [path for path in requested if path not in found]
+        filtered_bytes = filtered.encode("utf-8")
+        window, truncated = _diff_window(filtered_bytes, offset, max_bytes)
+        try:
+            window_text = window.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValidationFailed("offset is not on a UTF-8 character boundary") from error
         return DiffContent(
             number=number,
             format="diff",
-            size=len(response.content),
+            size=len(filtered_bytes),
+            total_size=len(response.content),
             sha256=hashlib.sha256(response.content).hexdigest(),
-            content=content,
+            content=window_text,
+            offset=offset,
+            returned_bytes=len(window),
+            truncated=truncated,
+            files_included=files_included,
+            files_missing=files_missing,
         )
 
     async def get_file_content(
@@ -2305,6 +2354,165 @@ def _file_path(value: str) -> str:
     ):
         raise ValidationFailed("path is invalid")
     return normalized
+
+
+_DIFF_HEADER_PREFIX = "diff --git "
+_DIFF_HEADER_MAX_SPLITS = 64
+_C_ESCAPES = {
+    "\\": b"\\",
+    '"': b'"',
+    "a": b"\a",
+    "b": b"\b",
+    "f": b"\f",
+    "n": b"\n",
+    "r": b"\r",
+    "t": b"\t",
+    "v": b"\v",
+}
+
+
+def split_diff_sections(content: str) -> list[DiffSection]:
+    """Split a unified diff into its ``diff --git`` sections, in order.
+
+    Text before the first header (rare) is dropped; every other byte of the diff belongs
+    to exactly one section, so joining the sections reproduces the diff.
+    """
+
+    sections: list[DiffSection] = []
+    current: list[str] = []
+    current_paths: tuple[str, frozenset[str]] | None = None
+    for line in io.StringIO(content, newline="\n"):
+        if line.startswith(_DIFF_HEADER_PREFIX):
+            if current_paths is not None:
+                sections.append(DiffSection("".join(current), current_paths[0], current_paths[1]))
+            current = []
+            current_paths = _diff_header_paths(line[len(_DIFF_HEADER_PREFIX) :].rstrip("\r\n"))
+        if current_paths is not None:
+            current.append(line)
+    if current_paths is not None:
+        sections.append(DiffSection("".join(current), current_paths[0], current_paths[1]))
+    return sections
+
+
+def _diff_header_paths(rest: str) -> tuple[str, frozenset[str]]:
+    """Return the ``b/`` path and every candidate path of a ``diff --git a/X b/Y`` header.
+
+    Git quotes unusual paths in C style; unquoted paths may contain spaces, which makes the
+    ``a/X b/Y`` split ambiguous, so a symmetric header is split in its middle and any other
+    header contributes every plausible ``" b/"`` split, bounded to keep the work linear.
+    """
+
+    if rest.startswith('"'):
+        first, remainder = _unquote_c_string(rest)
+        remainder = remainder.strip()
+        second = _unquote_c_string(remainder)[0] if remainder.startswith('"') else remainder
+        candidates = {_strip_side(first, "a/"), _strip_side(second, "b/")}
+        return _strip_side(second, "b/"), frozenset(candidates)
+    if len(rest) % 2 == 1:
+        middle = len(rest) // 2
+        left, right = rest[:middle], rest[middle + 1 :]
+        if (
+            rest[middle] == " "
+            and left.startswith("a/")
+            and right.startswith("b/")
+            and left[2:] == right[2:]
+        ):
+            return right[2:], frozenset({right[2:]})
+    candidates = set()
+    primary: str | None = None
+    start = 0
+    for _ in range(_DIFF_HEADER_MAX_SPLITS):
+        index = rest.find(" b/", start)
+        if index < 0:
+            break
+        left, right = rest[:index], rest[index + 3 :]
+        if left.startswith("a/"):
+            candidates.add(left[2:])
+            if right.startswith('"'):
+                right = _strip_side(_unquote_c_string(right)[0], "b/")
+            candidates.add(right)
+            if primary is None:
+                primary = right
+        start = index + 1
+    if primary is None:
+        primary = rest
+        candidates.add(rest)
+    return primary, frozenset(candidates)
+
+
+def _strip_side(value: str, prefix: str) -> str:
+    return value[len(prefix) :] if value.startswith(prefix) else value
+
+
+def _unquote_c_string(value: str) -> tuple[str, str]:
+    """Decode a git C-style quoted string; return it and the text after its closing quote."""
+
+    if not value.startswith('"'):
+        return value, ""
+    raw = bytearray()
+    index = 1
+    while index < len(value):
+        character = value[index]
+        if character == '"':
+            return raw.decode("utf-8", errors="replace"), value[index + 1 :]
+        if character == "\\" and index + 1 < len(value):
+            nxt = value[index + 1]
+            octal = value[index + 1 : index + 4]
+            if len(octal) == 3 and all(digit in "01234567" for digit in octal):
+                raw.append(int(octal, 8) & 0xFF)
+                index += 4
+                continue
+            raw.extend(_C_ESCAPES.get(nxt, nxt.encode("utf-8")))
+            index += 2
+            continue
+        raw.extend(character.encode("utf-8"))
+        index += 1
+    return raw.decode("utf-8", errors="replace"), ""
+
+
+def _diff_window(data: bytes, offset: int, max_bytes: int) -> tuple[bytes, bool]:
+    """Return at most ``max_bytes`` from ``offset``, cut on a line boundary when truncated.
+
+    A single line longer than the window is cut on a UTF-8 character boundary instead.
+    """
+
+    if offset >= len(data):
+        return b"", False
+    end = min(offset + max_bytes, len(data))
+    if end < len(data):
+        newline = data.rfind(b"\n", offset, end)
+        if newline >= offset:
+            end = newline + 1
+        else:
+            while end > offset and (data[end] & 0xC0) == 0x80:
+                end -= 1
+    return data[offset:end], end < len(data)
+
+
+def _diff_paths(values: Any) -> list[str]:
+    if not isinstance(values, list) or not values:
+        raise ValidationFailed("paths must be a non-empty list")
+    if len(values) > MAX_DIFF_PATHS:
+        raise ValidationFailed("paths contains too many items")
+    result: list[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            raise ValidationFailed("path is invalid")
+        normalized = _file_path(value)
+        if normalized not in result:
+            result.append(normalized)
+    return result
+
+
+def _diff_window_bounds(max_bytes: int, offset: int) -> None:
+    if (
+        not isinstance(max_bytes, int)
+        or isinstance(max_bytes, bool)
+        or not (1 <= max_bytes <= MAX_DIFF_BYTES)
+    ):
+        raise ValidationFailed("max_bytes is out of range")
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        raise ValidationFailed("offset is out of range")
 
 
 def _repository_name(value: str, label: str = "repository") -> str:

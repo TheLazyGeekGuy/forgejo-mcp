@@ -168,6 +168,14 @@ _OPTIONAL_ROOT_FILE_PATH = {
     "oneOf": [_FILE_PATH, {"type": "string", "const": ""}],
     "description": "Omit this field or use an empty string to list the repository root.",
 }
+_DIFF_PATHS = {"type": "array", "items": _FILE_PATH, "minItems": 1, "maxItems": 50}
+_DIFF_MAX_BYTES = {
+    "type": "integer",
+    "minimum": 1,
+    "maximum": 2 * 1024 * 1024,
+    "default": 64 * 1024,
+}
+_DIFF_OFFSET = {"type": "integer", "minimum": 0, "default": 0}
 _NUMBER = {"type": "integer", "minimum": 1}
 _TIMESTAMP = {"type": "string", "format": "date-time"}
 _TITLE = {"type": "string", "minLength": 1, "maxLength": 255}
@@ -1006,20 +1014,52 @@ _TOOL_SPECS = (
     ToolSpec(
         name="forgejo_get_pull_request_diff",
         title="Get pull request diff",
-        description="Return a bounded pull request diff.",
+        description=(
+            "Return a bounded, windowed pull request diff. Use forgejo_get_pull_request_files "
+            "first to list changed paths, then request only the paths you need. `paths` keeps "
+            "only the matching `diff --git` sections (renames match either name); `max_bytes` "
+            "(default 65536) and `offset` page through the filtered diff on line boundaries; "
+            "continue from `offset + returned_bytes` while `truncated` is true."
+        ),
         risk="read-sensitive",
         input_schema=_object_schema(
-            {"owner": _OWNER, "repo": _REPO, "number": _NUMBER}, ["owner", "repo", "number"]
+            {
+                "owner": _OWNER,
+                "repo": _REPO,
+                "number": _NUMBER,
+                "paths": _DIFF_PATHS,
+                "max_bytes": _DIFF_MAX_BYTES,
+                "offset": _DIFF_OFFSET,
+            },
+            ["owner", "repo", "number"],
         ),
         output_schema=_object_schema(
             {
                 "number": _NUMBER,
                 "format": {"const": "diff"},
                 "size": {"type": "integer", "minimum": 0},
+                "total_size": {"type": "integer", "minimum": 0},
+                "offset": _DIFF_OFFSET,
+                "returned_bytes": {"type": "integer", "minimum": 0},
+                "truncated": {"type": "boolean"},
+                "files_included": {"type": "array", "items": _FILE_PATH},
+                "files_missing": {"type": "array", "items": _FILE_PATH, "maxItems": 50},
                 "sha256": {"type": "string"},
                 "content": {"type": "string"},
             },
-            ["number", "format", "size", "sha256", "content"],
+            [
+                "number",
+                "format",
+                "size",
+                "total_size",
+                "offset",
+                "returned_bytes",
+                "truncated",
+                "files_included",
+                "files_missing",
+                "sha256",
+                "content",
+            ],
         ),
     ),
     ToolSpec(
