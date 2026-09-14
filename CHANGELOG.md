@@ -58,6 +58,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Changed
 
+- `forgejo_get_action_job_log` now returns a bounded window instead of the head of the log: the default window is the last 64 KiB, cut on line boundaries, with `max_bytes` (up to 1 MiB), `from_end`, `offset` and a case-insensitive `grep` filter that prefixes matching lines with their number; the result also reports `offset` and `returned_bytes`.
+- `forgejo_get_action_run_logs` now returns only an index (`name`, `size`, `sha256`) of the archived files by default; `include_content=true` restores file content, bounded per file by `max_bytes_per_file` (default 64 KiB, the end of each file) in addition to the existing 1 MiB total budget.
 - Batch MCP tool-discovery authorization against one permission snapshot, eliminating repeated registry writes and per-tool SQL reloads without changing deny-by-default decisions.
 - Treat an empty optional repository-content path as the repository root, avoiding repeated validation failures from MCP clients that serialize omitted strings as empty values.
 - Defined Forgejo 16.0.3 as the minimum supported release; the locked 16.0.2 contract and E2E run remain comparison evidence only and do not extend the published support range.

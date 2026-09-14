@@ -519,7 +519,20 @@ Review event 限定 `APPROVED`、`REQUEST_CHANGES` 或 `COMMENT`，可包含最�
 | `forgejo_create_tag` | `POST /repos/{owner}/{repo}/tags` |
 | `forgejo_create_release` | `POST /repos/{owner}/{repo}/releases` |
 
-Run 與 artifact 清單皆有界；job 清單最多回傳 100 筆。Job log 最多回傳 1 MiB UTF-8 文字並提供原始大小、SHA-256 與 `truncated`。Run log ZIP 最大接受 10 MiB，最多解開 100 個檔案且合計最多回傳 1 MiB 文字；不下載 artifact 內容。`forgejo_delete_action_run` 只適用於 Forgejo 允許刪除的已完成 run。Forgejo v16 沒有公開 PAT REST rerun endpoint，因此不提供 rerun 工具。
+Run 與 artifact 清單皆有界；job 清單最多回傳 100 筆。不下載 artifact 內容。
+
+`forgejo_get_action_job_log` 回傳 log 的一個視窗，而非整份 log：
+
+| 參數 | 型別 | 預設 | 說明 |
+|---|---|---|---|
+| `max_bytes` | integer 1..1048576 | 65536 | 最多回傳的位元組數（預設最後 64 KiB） |
+| `from_end` | boolean | `true` | `true` 回傳 log 結尾（錯誤通常在此）；`false` 回傳開頭 |
+| `offset` | integer ≥ 0 | 0 | 略過的位元組數；`from_end=true` 時從結尾計算，否則從開頭計算 |
+| `grep` | string ≤ 256 | 無 | 不分大小寫的子字串過濾：只回傳符合的行，每行加上 1 起算的行號前綴；`max_bytes`、`from_end` 與 `offset` 套用於過濾後的文字。空字串等同未設定 |
+
+視窗盡可能切在行邊界：只要視窗內有換行，回傳的文字不會從行中間開始或在行中間結束。輸出欄位：`content`（UTF-8，無效位元組以 U+FFFD 取代）、`size`（整份 log 的位元組數）、`sha256`（整份 log）、`offset`（`content` 第一個位元組在來源文字中從開頭起算的位置）、`returned_bytes`、`truncated`（是否有未回傳的來源文字）。
+
+`forgejo_get_action_run_logs` 預設只回傳索引：每個檔案的 `name`、`size` 與 `sha256`。`include_content=true` 時另回傳每個檔案結尾的視窗（`content`、`offset`、`returned_bytes`、`truncated`），每檔最多 `max_bytes_per_file`（預設 65536，上限 1048576）。ZIP 最大接受 10 MiB，最多處理 100 個檔案且合計最多回傳 1 MiB 文字；ZIP 只在記憶體中讀取，永不解壓到磁碟。`forgejo_delete_action_run` 只適用於 Forgejo 允許刪除的已完成 run。Forgejo v16 沒有公開 PAT REST rerun endpoint，因此不提供 rerun 工具。
 
 ## 6. Audit 規格
 
