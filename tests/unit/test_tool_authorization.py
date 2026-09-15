@@ -240,6 +240,8 @@ def test_batch_tool_authorization_loads_one_permission_snapshot() -> None:
         {"max_bytes": 1, "from_end": False, "offset": 0},
         {"max_bytes": 1024 * 1024, "offset": 10 * 1024 * 1024, "grep": "g" * 256},
         {"grep": ""},
+        {"filter": "none"},
+        {"filter": "ci", "grep": "error", "max_bytes": 4096},
     ],
 )
 def test_action_job_log_schema_accepts_window_arguments(arguments: dict[str, object]) -> None:
@@ -252,6 +254,12 @@ def test_action_job_log_schema_accepts_window_arguments(arguments: dict[str, obj
     assert schema["properties"]["max_bytes"]["default"] == 64 * 1024
     assert schema["properties"]["from_end"]["default"] is True
     assert schema["properties"]["offset"]["default"] == 0
+    assert schema["properties"]["filter"] == {
+        "type": "string",
+        "enum": ["none", "ci"],
+        "default": "none",
+        "description": schema["properties"]["filter"]["description"],
+    }
 
 
 @pytest.mark.parametrize(
@@ -264,6 +272,11 @@ def test_action_job_log_schema_accepts_window_arguments(arguments: dict[str, obj
         {"offset": -1},
         {"grep": "g" * 257},
         {"limit": 10},
+        {"filter": "all"},
+        {"filter": "CI"},
+        {"filter": ""},
+        {"filter": True},
+        {"filter": None},
     ],
 )
 def test_action_job_log_schema_rejects_out_of_range_window_arguments(
@@ -297,6 +310,42 @@ def test_action_log_output_schemas_describe_windows_and_index_entries() -> None:
     jsonschema.validate(
         instance={"name": "a.log", "size": 3, "sha256": "0" * 64}, schema=file_schema
     )
+    assert "filter_stats" not in job_log["required"]
+    assert "filter_stats" not in file_schema["required"]
+    stats_schema = job_log["properties"]["filter_stats"]
+    assert stats_schema == file_schema["properties"]["filter_stats"]
+    assert set(stats_schema["required"]) == set(stats_schema["properties"]) == _FILTER_STATS_KEYS
+    assert stats_schema["additionalProperties"] is False
+    stats = dict.fromkeys(_FILTER_STATS_KEYS, 0)
+    jsonschema.validate(
+        instance={
+            "job_id": 51,
+            "attempt": None,
+            "size": 3,
+            "sha256": "0" * 64,
+            "content": "",
+            "offset": 0,
+            "returned_bytes": 0,
+            "truncated": False,
+            "filter_stats": stats,
+        },
+        schema=job_log,
+    )
+    assert list(jsonschema.Draft202012Validator(stats_schema).iter_errors({**stats, "extra": 1}))
+    assert list(
+        jsonschema.Draft202012Validator(stats_schema).iter_errors({**stats, "removed_ansi": -1})
+    )
+
+
+_FILTER_STATS_KEYS = {
+    "removed_ansi",
+    "removed_carriage_returns",
+    "removed_timestamps",
+    "collapsed_lines",
+    "removed_blank_lines",
+    "original_lines",
+    "filtered_lines",
+}
 
 
 @pytest.mark.parametrize(
@@ -306,6 +355,8 @@ def test_action_log_output_schemas_describe_windows_and_index_entries() -> None:
         {"include_content": True},
         {"include_content": True, "max_bytes_per_file": 1},
         {"include_content": False, "max_bytes_per_file": 1024 * 1024},
+        {"include_content": True, "filter": "ci"},
+        {"filter": "none"},
     ],
 )
 def test_action_run_logs_schema_accepts_index_arguments(arguments: dict[str, object]) -> None:
@@ -317,6 +368,8 @@ def test_action_run_logs_schema_accepts_index_arguments(arguments: dict[str, obj
     assert schema["additionalProperties"] is False
     assert schema["properties"]["include_content"]["default"] is False
     assert schema["properties"]["max_bytes_per_file"]["default"] == 64 * 1024
+    assert schema["properties"]["filter"]["enum"] == ["none", "ci"]
+    assert schema["properties"]["filter"]["default"] == "none"
 
 
 @pytest.mark.parametrize(
@@ -326,6 +379,8 @@ def test_action_run_logs_schema_accepts_index_arguments(arguments: dict[str, obj
         {"max_bytes_per_file": 0},
         {"max_bytes_per_file": 1024 * 1024 + 1},
         {"max_bytes": 10},
+        {"filter": "raw"},
+        {"filter": 1},
     ],
 )
 def test_action_run_logs_schema_rejects_invalid_arguments(arguments: dict[str, object]) -> None:

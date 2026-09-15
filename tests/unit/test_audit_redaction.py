@@ -202,6 +202,7 @@ def test_action_log_window_arguments_are_audited_without_redaction() -> None:
         "from_end": True,
         "offset": 128,
         "grep": "error",
+        "filter": "ci",
         "run_id": 42,
         "include_content": False,
         "max_bytes_per_file": 4096,

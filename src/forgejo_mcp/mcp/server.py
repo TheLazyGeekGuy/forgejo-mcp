@@ -626,6 +626,7 @@ async def _execute_tool(
             from_end=cast(bool, arguments.get("from_end", True)),
             offset=cast(int, arguments.get("offset", 0)),
             grep=cast(str | None, arguments.get("grep")),
+            log_filter=cast(str, arguments.get("filter", "none")),
         )
     if name == "forgejo_get_action_run_logs":
         return await tools.get_action_run_logs(
@@ -636,6 +637,7 @@ async def _execute_tool(
             max_bytes_per_file=cast(
                 int, arguments.get("max_bytes_per_file", DEFAULT_ACTION_LOG_WINDOW_BYTES)
             ),
+            log_filter=cast(str, arguments.get("filter", "none")),
         )
     if name == "forgejo_list_action_run_artifacts":
         return _page_result(

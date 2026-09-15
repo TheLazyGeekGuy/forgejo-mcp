@@ -508,6 +508,42 @@ _ACTION_LOG_PER_FILE_BYTES = {
     "default": 64 * 1024,
     "description": "Maximum bytes returned per file (its end) when include_content is true.",
 }
+_ACTION_LOG_FILTER = {
+    "type": "string",
+    "enum": ["none", "ci"],
+    "default": "none",
+    "description": (
+        "Opt-in noise filter applied to the returned window only, after max_bytes/from_end/"
+        "offset/grep: 'ci' strips ANSI escape sequences, carriage-return rewrites, leading "
+        "timestamps (ISO 8601, [HH:MM:SS], HH:MM:SS.mmm), folds runs of identical lines into "
+        "one suffixed [×N] and runs of blank lines into one, and reports filter_stats. Lossy: "
+        "use 'none' when exact bytes matter; sha256, size, offset and returned_bytes always "
+        "describe the raw log."
+    ),
+}
+_ACTION_LOG_FILTER_STATS = _object_schema(
+    {
+        name: {"type": "integer", "minimum": 0}
+        for name in (
+            "removed_ansi",
+            "removed_carriage_returns",
+            "removed_timestamps",
+            "collapsed_lines",
+            "removed_blank_lines",
+            "original_lines",
+            "filtered_lines",
+        )
+    },
+    [
+        "removed_ansi",
+        "removed_carriage_returns",
+        "removed_timestamps",
+        "collapsed_lines",
+        "removed_blank_lines",
+        "original_lines",
+        "filtered_lines",
+    ],
+)
 _ACTION_LOG_SCHEMA = _object_schema(
     {
         "job_id": _NUMBER,
@@ -518,6 +554,7 @@ _ACTION_LOG_SCHEMA = _object_schema(
         "offset": {"type": "integer", "minimum": 0},
         "returned_bytes": {"type": "integer", "minimum": 0},
         "truncated": {"type": "boolean"},
+        "filter_stats": _ACTION_LOG_FILTER_STATS,
     },
     ["job_id", "attempt", "size", "sha256", "content", "offset", "returned_bytes", "truncated"],
 )
@@ -530,6 +567,7 @@ _ACTION_LOG_FILE_SCHEMA = _object_schema(
         "offset": {"type": "integer", "minimum": 0},
         "returned_bytes": {"type": "integer", "minimum": 0},
         "truncated": {"type": "boolean"},
+        "filter_stats": _ACTION_LOG_FILTER_STATS,
     },
     ["name", "size", "sha256"],
 )
@@ -1572,8 +1610,8 @@ _TOOL_SPECS = (
         title="Get action job log",
         description=(
             "Return a bounded window of plaintext log content for an action job attempt: "
-            "the last 64 KiB by default, up to 1 MiB, with head/tail offsets and an optional "
-            "case-insensitive line filter."
+            "the last 64 KiB by default, up to 1 MiB, with head/tail offsets, an optional "
+            "case-insensitive line filter and an opt-in CI noise filter."
         ),
         risk="read-sensitive",
         input_schema=_object_schema(
@@ -1586,6 +1624,7 @@ _TOOL_SPECS = (
                 "from_end": _ACTION_LOG_FROM_END,
                 "offset": _ACTION_LOG_OFFSET,
                 "grep": _ACTION_LOG_GREP,
+                "filter": _ACTION_LOG_FILTER,
             },
             ["owner", "repo", "job_id"],
         ),
@@ -1596,7 +1635,8 @@ _TOOL_SPECS = (
         title="Get action run logs",
         description=(
             "Return an index (name, size, SHA-256) of the files in an action run log archive; "
-            "with include_content, also return a bounded tail window of each file."
+            "with include_content, also return a bounded tail window of each file, optionally "
+            "passed through the CI noise filter."
         ),
         risk="read-sensitive",
         input_schema=_object_schema(
@@ -1606,6 +1646,7 @@ _TOOL_SPECS = (
                 "run_id": _NUMBER,
                 "include_content": _ACTION_LOG_INCLUDE_CONTENT,
                 "max_bytes_per_file": _ACTION_LOG_PER_FILE_BYTES,
+                "filter": _ACTION_LOG_FILTER,
             },
             ["owner", "repo", "run_id"],
         ),
