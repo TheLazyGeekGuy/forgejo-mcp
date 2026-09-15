@@ -230,3 +230,213 @@ def test_batch_tool_authorization_loads_one_permission_snapshot() -> None:
         permissions.grant_names.assert_awaited_once_with(token_id)
 
     asyncio.run(exercise())
+
+
+LIST_TOOLS_WITH_FIELDS = (
+    "forgejo_list_repositories",
+    "forgejo_list_issues",
+    "forgejo_list_issue_comments",
+    "forgejo_list_pull_requests",
+)
+_LIST_TOOL_BASE_ARGUMENTS: dict[str, dict[str, object]] = {
+    "forgejo_list_repositories": {},
+    "forgejo_list_issues": {"owner": "owner", "repo": "repo"},
+    "forgejo_list_issue_comments": {"owner": "owner", "repo": "repo", "number": 1},
+    "forgejo_list_pull_requests": {"owner": "owner", "repo": "repo"},
+}
+
+
+@pytest.mark.parametrize("tool_name", LIST_TOOLS_WITH_FIELDS)
+def test_list_tool_fields_selector_is_a_closed_enum_defaulting_to_compact(tool_name: str) -> None:
+    spec = get_tool(tool_name)
+    fields = spec.input_schema["properties"]["fields"]
+    validator = jsonschema.Draft202012Validator(spec.input_schema)
+    base = _LIST_TOOL_BASE_ARGUMENTS[tool_name]
+
+    assert fields == {"type": "string", "enum": ["compact", "full"], "default": "compact"}
+    assert "fields" not in spec.input_schema["required"]
+    assert not list(validator.iter_errors(base)), "fields must be optional"
+    assert not list(validator.iter_errors({**base, "fields": "compact"}))
+    assert not list(validator.iter_errors({**base, "fields": "full"}))
+    assert any(
+        list(error.path) == ["fields"]
+        for error in validator.iter_errors({**base, "fields": "verbose"})
+    )
+
+
+@pytest.mark.parametrize("tool_name", LIST_TOOLS_WITH_FIELDS)
+def test_list_tool_output_schema_requires_truncation_flag_and_relaxes_links(
+    tool_name: str,
+) -> None:
+    item = get_tool(tool_name).output_schema["properties"]["items"]["items"]
+    flag = "description_truncated" if tool_name == "forgejo_list_repositories" else "body_truncated"
+
+    assert item["properties"][flag] == {"type": "boolean"}
+    assert flag in item["required"]
+    assert "html_url" in item["properties"]
+    assert "html_url" not in item["required"]
+    if "user" in item["properties"]:
+        user = item["properties"]["user"]
+        assert "avatar_url" in user["properties"]
+        assert "avatar_url" not in user["required"]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {},
+        {"attempt": 2},
+        {"max_bytes": 1, "from_end": False, "offset": 0},
+        {"max_bytes": 1024 * 1024, "offset": 10 * 1024 * 1024, "grep": "g" * 256},
+        {"grep": ""},
+        {"filter": "none"},
+        {"filter": "ci", "grep": "error", "max_bytes": 4096},
+    ],
+)
+def test_action_job_log_schema_accepts_window_arguments(arguments: dict[str, object]) -> None:
+    schema = get_tool("forgejo_get_action_job_log").input_schema
+
+    jsonschema.validate(
+        instance={"owner": "owner", "repo": "repo", "job_id": 51, **arguments}, schema=schema
+    )
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["max_bytes"]["default"] == 64 * 1024
+    assert schema["properties"]["from_end"]["default"] is True
+    assert schema["properties"]["offset"]["default"] == 0
+    assert schema["properties"]["filter"] == {
+        "type": "string",
+        "enum": ["none", "ci"],
+        "default": "none",
+        "description": schema["properties"]["filter"]["description"],
+    }
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"max_bytes": 0},
+        {"max_bytes": 1024 * 1024 + 1},
+        {"max_bytes": "64"},
+        {"from_end": "yes"},
+        {"offset": -1},
+        {"grep": "g" * 257},
+        {"limit": 10},
+        {"filter": "all"},
+        {"filter": "CI"},
+        {"filter": ""},
+        {"filter": True},
+        {"filter": None},
+    ],
+)
+def test_action_job_log_schema_rejects_out_of_range_window_arguments(
+    arguments: dict[str, object],
+) -> None:
+    validator = jsonschema.Draft202012Validator(get_tool("forgejo_get_action_job_log").input_schema)
+
+    assert list(
+        validator.iter_errors({"owner": "owner", "repo": "repo", "job_id": 51, **arguments})
+    )
+
+
+def test_action_log_output_schemas_describe_windows_and_index_entries() -> None:
+    job_log = get_tool("forgejo_get_action_job_log").output_schema
+    run_logs = get_tool("forgejo_get_action_run_logs").output_schema
+    file_schema = run_logs["properties"]["files"]["items"]
+
+    assert set(job_log["required"]) == {
+        "job_id",
+        "attempt",
+        "size",
+        "sha256",
+        "content",
+        "offset",
+        "returned_bytes",
+        "truncated",
+    }
+    assert set(file_schema["required"]) == {"name", "size", "sha256"}
+    assert {"content", "offset", "returned_bytes", "truncated"} <= set(file_schema["properties"])
+    assert file_schema["additionalProperties"] is False
+    jsonschema.validate(
+        instance={"name": "a.log", "size": 3, "sha256": "0" * 64}, schema=file_schema
+    )
+    assert "filter_stats" not in job_log["required"]
+    assert "filter_stats" not in file_schema["required"]
+    stats_schema = job_log["properties"]["filter_stats"]
+    assert stats_schema == file_schema["properties"]["filter_stats"]
+    assert set(stats_schema["required"]) == set(stats_schema["properties"]) == _FILTER_STATS_KEYS
+    assert stats_schema["additionalProperties"] is False
+    stats = dict.fromkeys(_FILTER_STATS_KEYS, 0)
+    jsonschema.validate(
+        instance={
+            "job_id": 51,
+            "attempt": None,
+            "size": 3,
+            "sha256": "0" * 64,
+            "content": "",
+            "offset": 0,
+            "returned_bytes": 0,
+            "truncated": False,
+            "filter_stats": stats,
+        },
+        schema=job_log,
+    )
+    assert list(jsonschema.Draft202012Validator(stats_schema).iter_errors({**stats, "extra": 1}))
+    assert list(
+        jsonschema.Draft202012Validator(stats_schema).iter_errors({**stats, "removed_ansi": -1})
+    )
+
+
+_FILTER_STATS_KEYS = {
+    "removed_ansi",
+    "removed_carriage_returns",
+    "removed_timestamps",
+    "collapsed_lines",
+    "removed_blank_lines",
+    "original_lines",
+    "filtered_lines",
+}
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {},
+        {"include_content": True},
+        {"include_content": True, "max_bytes_per_file": 1},
+        {"include_content": False, "max_bytes_per_file": 1024 * 1024},
+        {"include_content": True, "filter": "ci"},
+        {"filter": "none"},
+    ],
+)
+def test_action_run_logs_schema_accepts_index_arguments(arguments: dict[str, object]) -> None:
+    schema = get_tool("forgejo_get_action_run_logs").input_schema
+
+    jsonschema.validate(
+        instance={"owner": "owner", "repo": "repo", "run_id": 42, **arguments}, schema=schema
+    )
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["include_content"]["default"] is False
+    assert schema["properties"]["max_bytes_per_file"]["default"] == 64 * 1024
+    assert schema["properties"]["filter"]["enum"] == ["none", "ci"]
+    assert schema["properties"]["filter"]["default"] == "none"
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"include_content": "true"},
+        {"max_bytes_per_file": 0},
+        {"max_bytes_per_file": 1024 * 1024 + 1},
+        {"max_bytes": 10},
+        {"filter": "raw"},
+        {"filter": 1},
+    ],
+)
+def test_action_run_logs_schema_rejects_invalid_arguments(arguments: dict[str, object]) -> None:
+    validator = jsonschema.Draft202012Validator(
+        get_tool("forgejo_get_action_run_logs").input_schema
+    )
+
+    assert list(
+        validator.iter_errors({"owner": "owner", "repo": "repo", "run_id": 42, **arguments})
+    )

@@ -714,3 +714,45 @@ async def test_reject_invalid_version_payload() -> None:
 
     with pytest.raises(ExternalServiceUnavailable, match="invalid version"):
         await client.get_version(base_url="https://git.example.test", verify_tls=True)
+
+
+async def test_list_repositories_compact_items_bound_description_and_drop_links() -> None:
+    from forgejo_mcp.forgejo.models import parse_repository
+
+    long_description = "word " * 100
+    payloads = [
+        {**repository_payload(), "id": 1, "description": long_description},
+        {**repository_payload(), "id": 2, "description": "MCP server"},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "fields" not in request.url.params
+        return httpx.Response(200, json=payloads)
+
+    client = ForgejoClient(connect_timeout_seconds=2, transport=httpx.MockTransport(handler))
+    common = {"base_url": "https://git.example.test", "token": "pat", "verify_tls": True}
+
+    compact = await client.list_repositories(**common, page=1, limit=30, order_by="recentupdate")
+    long_item, short_item = [item.model_dump(mode="json") for item in compact.items]
+
+    assert long_item["description_truncated"] is True
+    assert long_item["description"].endswith("…")
+    assert len(long_item["description"]) <= 201
+    assert long_description.startswith(long_item["description"].removesuffix("…"))
+    assert short_item["description"] == "MCP server"
+    assert short_item["description_truncated"] is False
+    assert "html_url" not in long_item and "html_url" not in short_item
+    assert short_item["permissions"] == {"admin": True, "pull": True, "push": True}
+
+    full = await client.list_repositories(
+        **common, page=1, limit=30, order_by="recentupdate", fields="full"
+    )
+
+    assert [item.model_dump(mode="json") for item in full.items] == [
+        {**parse_repository(payload).model_dump(mode="json"), "description_truncated": False}
+        for payload in payloads
+    ]
+    with pytest.raises(ValidationFailed):
+        await client.list_repositories(
+            **common, page=1, limit=30, order_by="recentupdate", fields="verbose"
+        )

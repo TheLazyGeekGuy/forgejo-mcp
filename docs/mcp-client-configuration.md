@@ -100,6 +100,12 @@ Forgejo MCP rejects query-string authentication. The token must be sent as a Bea
 
 Requests carrying an HTTP `Origin` header are rejected unless that exact normalized origin is present in the deployment's `FMCP_MCP_ALLOWED_ORIGINS` JSON list. Native MCP clients normally omit this header. Configure the allowlist only for an intentional browser-based client; wildcard origins are not supported.
 
+## Tool result size
+
+Every successful tool call returns its result once as compact JSON text (no indentation, UTF-8 characters kept as-is) and, by default, a second time as MCP `structuredContent` that matches the tool's advertised `outputSchema`. Clients that parse text only pay twice for the same payload, and the 50 output schemas make up roughly half of the `tools/list` response.
+
+Set `FMCP_MCP_STRUCTURED_OUTPUT=false` to drop both together: `tools/list` then omits `outputSchema` and `tools/call` returns only the compact text block. The default `true` keeps the current contract for clients that rely on structured output. The two halves cannot be split, because the MCP SDK validates `structuredContent` against `outputSchema` whenever the schema is announced.
+
 ## Confirm the connection
 
 After saving the configuration:

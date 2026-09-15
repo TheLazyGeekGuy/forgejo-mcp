@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 import uuid
 from collections.abc import Callable
@@ -35,6 +36,10 @@ from forgejo_mcp.auth.mcp_bearer import (
 from forgejo_mcp.auth.rate_limit import MultiScopeRateLimiter
 from forgejo_mcp.authorization.tools import ToolAuthorizationDecision
 from forgejo_mcp.config import Settings, normalize_http_origin
+from forgejo_mcp.forgejo.client import (
+    DEFAULT_ACTION_LOG_WINDOW_BYTES,
+    DEFAULT_DIFF_WINDOW_BYTES,
+)
 from forgejo_mcp.observability.context import (
     reset_invocation_id,
     reset_user_id,
@@ -47,8 +52,11 @@ from forgejo_mcp.observability.metrics import (
     RATE_LIMITED,
 )
 from forgejo_mcp.tools import get_tool, list_tools
+from forgejo_mcp.tools.registry import ToolSpec
 
 SessionFactoryProvider = Callable[[], async_sessionmaker[AsyncSession]]
+ToolResultContent = list[TextContent]
+ToolResult = ToolResultContent | tuple[ToolResultContent, dict[str, Any]]
 
 
 class McpHttpApplication:
@@ -147,26 +155,14 @@ def build_mcp_runtime(
                 decision = decisions[spec.name]
                 if decision.allowed:
                     visible.append(
-                        Tool(
-                            name=spec.name,
-                            title=spec.title,
-                            description=spec.description,
-                            inputSchema=spec.input_schema,
-                            outputSchema=spec.output_schema,
-                            annotations=ToolAnnotations(
-                                readOnlyHint=spec.risk != "write",
-                                destructiveHint=False,
-                                idempotentHint=spec.risk != "write",
-                                openWorldHint=True,
-                            ),
+                        build_tool_definition(
+                            spec, structured_output=settings.mcp_structured_output
                         )
                     )
         return visible
 
     @server.call_tool(validate_input=False)  # type: ignore[untyped-decorator]
-    async def handle_call_tool(
-        name: str, arguments: dict[str, Any]
-    ) -> dict[str, Any] | CallToolResult:
+    async def handle_call_tool(name: str, arguments: dict[str, Any]) -> ToolResult | CallToolResult:
         started = time.monotonic()
         outcome = "failed"
         spec = get_tool(name)
@@ -219,7 +215,9 @@ def build_mcp_runtime(
                         return _tool_error(_safe_error_message(error))
                     await audit.complete_success(invocation, result)
                     outcome = "succeeded"
-                    return result
+                    return serialize_tool_result(
+                        result, structured_output=settings.mcp_structured_output
+                    )
                 finally:
                     reset_invocation_id(invocation_context)
         except ServiceShuttingDown:
@@ -324,6 +322,7 @@ async def _execute_tool(
             page=cast(int, arguments.get("page", 1)),
             limit=cast(int, arguments.get("limit", 30)),
             order_by=cast(str, arguments.get("order_by", "recentupdate")),
+            fields=cast(str, arguments.get("fields", "compact")),
         )
         return _page_result(repository_page)
     if name == "forgejo_get_repository":
@@ -445,6 +444,7 @@ async def _execute_tool(
                 sort=cast(str, arguments.get("sort", "latest")),
                 page=cast(int, arguments.get("page", 1)),
                 limit=cast(int, arguments.get("limit", 30)),
+                fields=cast(str, arguments.get("fields", "compact")),
             )
         )
     if name == "forgejo_get_issue":
@@ -458,6 +458,7 @@ async def _execute_tool(
             number=cast(int, arguments["number"]),
             since=cast(str | None, arguments.get("since")),
             before=cast(str | None, arguments.get("before")),
+            fields=cast(str, arguments.get("fields", "compact")),
         )
         return {
             "items": [item.model_dump(mode="json") for item in comments_result.items],
@@ -476,6 +477,7 @@ async def _execute_tool(
                 sort=cast(str, arguments.get("sort", "recentupdate")),
                 page=cast(int, arguments.get("page", 1)),
                 limit=cast(int, arguments.get("limit", 30)),
+                fields=cast(str, arguments.get("fields", "compact")),
             )
         )
     if name == "forgejo_get_pull_request":
@@ -494,12 +496,23 @@ async def _execute_tool(
         )
     if name == "forgejo_get_pull_request_diff":
         diff_result = await tools.get_pull_request_diff(
-            user_id, **common, number=cast(int, arguments["number"])
+            user_id,
+            **common,
+            number=cast(int, arguments["number"]),
+            paths=cast(list[str] | None, arguments.get("paths")),
+            max_bytes=cast(int, arguments.get("max_bytes", DEFAULT_DIFF_WINDOW_BYTES)),
+            offset=cast(int, arguments.get("offset", 0)),
         )
         return {
             "number": diff_result.number,
             "format": diff_result.format,
             "size": diff_result.size,
+            "total_size": diff_result.total_size,
+            "offset": diff_result.offset,
+            "returned_bytes": diff_result.returned_bytes,
+            "truncated": diff_result.truncated,
+            "files_included": diff_result.files_included,
+            "files_missing": diff_result.files_missing,
             "sha256": diff_result.sha256,
             "content": diff_result.content,
         }
@@ -621,10 +634,22 @@ async def _execute_tool(
             **common,
             job_id=cast(int, arguments["job_id"]),
             attempt=cast(int | None, arguments.get("attempt")),
+            max_bytes=cast(int, arguments.get("max_bytes", DEFAULT_ACTION_LOG_WINDOW_BYTES)),
+            from_end=cast(bool, arguments.get("from_end", True)),
+            offset=cast(int, arguments.get("offset", 0)),
+            grep=cast(str | None, arguments.get("grep")),
+            log_filter=cast(str, arguments.get("filter", "none")),
         )
     if name == "forgejo_get_action_run_logs":
         return await tools.get_action_run_logs(
-            user_id, **common, run_id=cast(int, arguments["run_id"])
+            user_id,
+            **common,
+            run_id=cast(int, arguments["run_id"]),
+            include_content=cast(bool, arguments.get("include_content", False)),
+            max_bytes_per_file=cast(
+                int, arguments.get("max_bytes_per_file", DEFAULT_ACTION_LOG_WINDOW_BYTES)
+            ),
+            log_filter=cast(str, arguments.get("filter", "none")),
         )
     if name == "forgejo_list_action_run_artifacts":
         return _page_result(
@@ -751,6 +776,44 @@ def _page_result(result: Any) -> dict[str, Any]:
         "limit": result.limit,
         "has_more": result.has_more,
     }
+
+
+def build_tool_definition(spec: ToolSpec, *, structured_output: bool) -> Tool:
+    """Advertise a tool; the output schema is announced only when structured output is on.
+
+    The MCP SDK validates ``structuredContent`` against ``outputSchema`` whenever the
+    latter is announced, so both must be present or absent together.
+    """
+    return Tool(
+        name=spec.name,
+        title=spec.title,
+        description=spec.description,
+        inputSchema=spec.input_schema,
+        outputSchema=spec.output_schema if structured_output else None,
+        annotations=ToolAnnotations(
+            readOnlyHint=spec.risk != "write",
+            destructiveHint=False,
+            idempotentHint=spec.risk != "write",
+            openWorldHint=True,
+        ),
+    )
+
+
+def serialize_tool_result(result: dict[str, Any], *, structured_output: bool) -> ToolResult:
+    """Render a tool result once, as compact JSON text.
+
+    Returning a plain ``dict`` would make the SDK emit ``json.dumps(indent=2)`` text next to
+    ``structuredContent``; the compact text carries the same payload with fewer tokens.
+    """
+    content: ToolResultContent = [
+        TextContent(
+            type="text",
+            text=json.dumps(result, separators=(",", ":"), ensure_ascii=False),
+        )
+    ]
+    if structured_output:
+        return content, result
+    return content
 
 
 def _tool_error(message: str) -> CallToolResult:

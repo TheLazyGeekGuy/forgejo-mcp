@@ -40,6 +40,7 @@ v1 提供 30 個唯讀工具及 20 個寫入工具，共 50 個。平台不提�
 | `path` | 1–1024 字元、相對 repository root、不得以 `/` 開頭、不得包含 NUL 或 `..` segment |
 | `page` | default `1`，範圍 1–100000 |
 | `limit` | default `30`，範圍 1–100，server 不接受無界列表 |
+| `fields` | 列表工具專用，`compact | full`，default `compact`；見 2.7 |
 | 搜尋字串 | 最多 256 字元 |
 | title | 1–255 字元，trim 後不可為空 |
 | issue/PR body | 最多 65,536 字元 |
@@ -105,6 +106,20 @@ Tool error 使用穩定類型，訊息不得包含 PAT、MCP Token、Authorizati
 | `forgejo_unavailable` | Network error 或 Forgejo `5xx` |
 
 唯讀 GET 可針對連線中斷及明確暫時性 `5xx` 做有限 jitter retry；所有寫入工具不得自動 retry。
+
+### 2.7 列表精簡輸出（`fields`）
+
+`forgejo_list_repositories`、`forgejo_list_issues`、`forgejo_list_issue_comments` 與 `forgejo_list_pull_requests` 回傳的是 **list item**，不是完整的 `*Summary`；單筆 `get_*` 工具不受影響。
+
+| `fields` | 行為 |
+| --- | --- |
+| `compact`（default） | `body`（repository 為 `description`）縮短為最多 200 字元的摘錄，盡量在字或行邊界切斷，被截斷時以 `…` 結尾並回傳 `body_truncated: true`（repository 為 `description_truncated`）；item 與其 `user`/`assignees` 省略 `html_url` 與 `avatar_url` |
+| `full` | 完整 `body`/`description`、所有欄位（含 `html_url`、`avatar_url`），`body_truncated`/`description_truncated` 固定為 `false` |
+
+- `body: null` 保持 `null`，`body_truncated: false`。
+- 截斷旗標在兩種形式下都是必填；`html_url`/`avatar_url` 在 schema 中為 optional。
+- 完整內容請改用 `forgejo_get_issue`、`forgejo_get_pull_request` 或 `forgejo_get_repository`。
+- 量測：30 筆 4 KiB body 的 issue 頁面，`compact` 約為 `full` 的 14%（19,844 vs 141,704 bytes）。
 
 ## 3. Normalized resource shapes
 
@@ -208,6 +223,15 @@ closed_at: datetime | null
 merged_at: datetime | null
 ```
 
+### List items（`fields=compact | full`）
+
+```text
+RepositoryListItem  = RepositorySummary + description_truncated: boolean；compact 時省略 html_url
+IssueListItem       = IssueSummary + body_truncated: boolean；compact 時省略 html_url 與 user/assignees 的 avatar_url
+CommentListItem     = CommentSummary + body_truncated: boolean；compact 時省略 html_url 與 user.avatar_url
+PullRequestListItem = PullRequestSummary + body_truncated: boolean；compact 時省略 html_url 與 user.avatar_url
+```
+
 ## 4. 唯讀工具規格
 
 ### 4.1 `forgejo_get_current_user`
@@ -224,9 +248,9 @@ merged_at: datetime | null
 - **Risk:** `read`
 - **Forgejo:** `GET /api/v1/user/repos`
 - **預期最小 scope:** `read:user`；private repository 能見度仍由 PAT 決定。
-- **Input:** `page`、`limit`、`order_by`。
+- **Input:** `page`、`limit`、`order_by`、optional `fields`（`compact | full`, default `compact`）。
 - **`order_by`:** `name | id | newest | oldest | recentupdate | leastupdate | alphabetically | reversealphabetically | size | reversesize | moststars | feweststars | mostforks | fewestforks`，default `recentupdate`。
-- **Output:** paginated `RepositorySummary`。
+- **Output:** paginated `RepositoryListItem`（見 2.7）。
 
 ### 4.3 `forgejo_get_repository`
 
@@ -346,9 +370,9 @@ Forgejo v16 compare response 不提供可靠的 ahead/behind 或 resolved base/h
 - **Risk:** `read`
 - **Forgejo:** `GET /api/v1/repos/{owner}/{repo}/issues`，固定上游 `type=issues`。
 - **預期最小 scope:** `read:issue`
-- **Input:** `owner`、`repo`、`state` (`open | closed | all`, default `open`)、optional `labels: string[]`、optional `milestones: string[]`、optional `query`、optional `since`、optional `before`、`sort`、`page`、`limit`。
+- **Input:** `owner`、`repo`、`state` (`open | closed | all`, default `open`)、optional `labels: string[]`、optional `milestones: string[]`、optional `query`、optional `since`、optional `before`、`sort`、`page`、`limit`、optional `fields`（`compact | full`, default `compact`）。
 - **`sort`:** `relevance | latest | oldest | recentupdate | leastupdate | mostcomment | leastcomment`，default `latest`。
-- **Output:** paginated `IssueSummary`。
+- **Output:** paginated `IssueListItem`（見 2.7）。
 
 ### 4.10 `forgejo_get_issue`
 
@@ -364,8 +388,8 @@ Forgejo v16 compare response 不提供可靠的 ahead/behind 或 resolved base/h
 - **Risk:** `read-sensitive`
 - **Forgejo:** `GET /api/v1/repos/{owner}/{repo}/issues/{index}/comments`
 - **預期最小 scope:** `read:issue`
-- **Input:** `owner`、`repo`、`number`、optional `since`、optional `before`。
-- **Output:** `{ items: CommentSummary[], truncated: boolean }`，最多 100 筆。
+- **Input:** `owner`、`repo`、`number`、optional `since`、optional `before`、optional `fields`（`compact | full`, default `compact`）。
+- **Output:** `{ items: CommentListItem[], truncated: boolean }`，最多 100 筆（見 2.7）。
 - 同一 endpoint 同時適用 issue 與 PR conversation comments。
 
 ### 4.12 `forgejo_list_pull_requests`
@@ -373,9 +397,9 @@ Forgejo v16 compare response 不提供可靠的 ahead/behind 或 resolved base/h
 - **Risk:** `read`
 - **Forgejo:** `GET /api/v1/repos/{owner}/{repo}/pulls`
 - **預期最小 scope:** `read:repository`
-- **Input:** `owner`、`repo`、`state` (`open | closed | all`, default `open`)、optional `base`、`head`、`label_ids: integer[]`、optional `milestone_id`、`sort`、`page`、`limit`。
+- **Input:** `owner`、`repo`、`state` (`open | closed | all`, default `open`)、optional `base`、`head`、`label_ids: integer[]`、optional `milestone_id`、`sort`、`page`、`limit`、optional `fields`（`compact | full`, default `compact`）。
 - **`sort`:** `oldest | recentupdate | recentclose | leastupdate | mostcomment | leastcomment | priority`，default `recentupdate`。
-- **Output:** paginated `PullRequestSummary`。
+- **Output:** paginated `PullRequestListItem`（見 2.7）。
 
 ### 4.13 `forgejo_get_pull_request`
 
@@ -390,9 +414,12 @@ Forgejo v16 compare response 不提供可靠的 ahead/behind 或 resolved base/h
 - **Risk:** `read-sensitive`
 - **Forgejo:** `GET /api/v1/repos/{owner}/{repo}/pulls/{index}.diff?binary=false`
 - **預期最小 scope:** `read:repository`
-- **Input:** `owner`、`repo`、`number`。
-- **Output:** `{ number, format: "diff", size, sha256, content }`。
-- Diff 超過 2 MiB 時拒絕，不回傳部分 diff。
+- **Input:** `owner`、`repo`、`number`、optional `paths`（1–50 個 file path，與 `forgejo_get_file_content` 的 `path` 同一 schema）、`max_bytes`（1–2,097,152，預設 65,536）、`offset`（≥ 0，以 filtered diff 的 byte 為單位）。
+- **Output:** `{ number, format: "diff", size, total_size, offset, returned_bytes, truncated, files_included, files_missing, sha256, content }`。
+- 建議先呼叫 `forgejo_get_pull_request_files` 列出變更路徑，再只索取需要的 `paths`。
+- `paths` 以 `diff --git a/<p> b/<p>` section 為單位做精確比對（normalize 後、不支援 glob）；rename 以舊名或新名皆可命中。`files_included` 為實際命中的路徑、`files_missing` 為 diff 中不存在的路徑；沒有 `paths` 時回傳整個 diff，`files_included` 列出所有 section 路徑。
+- `size` 為 filtered diff 的大小、`total_size` 與 `sha256` 永遠描述完整 diff。`content` 為自 `offset` 起最多 `max_bytes` 的視窗，截斷時切在行邊界（單行超過視窗時切在 UTF-8 字元邊界）；`truncated` 為 true 時以 `offset + returned_bytes` 續讀。
+- 完整 diff 超過 2 MiB 時仍然拒絕（`MAX_DIFF_BYTES` 不變，過濾在接收之後才發生），不回傳部分 diff。
 - Audit 只保存 number、size、SHA-256，不保存 diff content。
 
 ### 4.15 `forgejo_get_git_tree`
@@ -519,7 +546,25 @@ Review event 限定 `APPROVED`、`REQUEST_CHANGES` 或 `COMMENT`，可包含最�
 | `forgejo_create_tag` | `POST /repos/{owner}/{repo}/tags` |
 | `forgejo_create_release` | `POST /repos/{owner}/{repo}/releases` |
 
-Run 與 artifact 清單皆有界；job 清單最多回傳 100 筆。Job log 最多回傳 1 MiB UTF-8 文字並提供原始大小、SHA-256 與 `truncated`。Run log ZIP 最大接受 10 MiB，最多解開 100 個檔案且合計最多回傳 1 MiB 文字；不下載 artifact 內容。`forgejo_delete_action_run` 只適用於 Forgejo 允許刪除的已完成 run。Forgejo v16 沒有公開 PAT REST rerun endpoint，因此不提供 rerun 工具。
+Run 與 artifact 清單皆有界；job 清單最多回傳 100 筆。不下載 artifact 內容。
+
+`forgejo_get_action_job_log` 回傳 log 的一個視窗，而非整份 log：
+
+| 參數 | 型別 | 預設 | 說明 |
+|---|---|---|---|
+| `max_bytes` | integer 1..1048576 | 65536 | 最多回傳的位元組數（預設最後 64 KiB） |
+| `from_end` | boolean | `true` | `true` 回傳 log 結尾（錯誤通常在此）；`false` 回傳開頭 |
+| `offset` | integer ≥ 0 | 0 | 略過的位元組數；`from_end=true` 時從結尾計算，否則從開頭計算 |
+| `grep` | string ≤ 256 | 無 | 不分大小寫的子字串過濾：只回傳符合的行，每行加上 1 起算的行號前綴；`max_bytes`、`from_end` 與 `offset` 套用於過濾後的文字。空字串等同未設定 |
+| `filter` | enum `none` \| `ci` | `none` | 明確啟用的雜訊過濾，只套用於已切好的視窗（在 `max_bytes`、`from_end`、`offset`、`grep` 之後），永不套用於原始 log |
+
+視窗盡可能切在行邊界：只要視窗內有換行，回傳的文字不會從行中間開始或在行中間結束。輸出欄位：`content`（UTF-8，無效位元組以 U+FFFD 取代）、`size`（整份 log 的位元組數）、`sha256`（整份 log）、`offset`（`content` 第一個位元組在來源文字中從開頭起算的位置）、`returned_bytes`、`truncated`（是否有未回傳的來源文字）。
+
+`filter=ci` 以純 stdlib 正規表示式移除一組封閉的雜訊形狀，其餘內容原樣通過：(a) ANSI 逃逸序列（CSI `ESC[...`、游標控制、OSC `ESC]...BEL`）與進度列的歸位字元（每行只保留最後一個 `\r` 之後的片段；CRLF 行保留其內容）；(b) 行首的時間戳記，僅限三種嚴格形狀且後接一個空格或行尾：ISO 8601 `YYYY-MM-DDTHH:MM:SS(.frac)?(Z|±HH:MM)`、`[HH:MM:SS]`、`HH:MM:SS.mmm`（行中的時間、缺少毫秒的 `HH:MM:SS`、縮排後的時間戳記都不會被動到）；(c) 經 (a)(b) 處理後連續且完全相同的行合併為一行並加上 ` [×N]` 後綴；(d) 連續空行只保留一行。`grep` 的行號前綴位於行首，因此 (b) 與 (c) 對 `grep` 輸出不會生效，只有 (a) 與 (d) 仍會套用。
+
+`filter != none` 時輸出多一個 `filter_stats` 物件，宣告過濾器移除了什麼：`removed_ansi`（移除的逃逸序列數）、`removed_carriage_returns`、`removed_timestamps`、`collapsed_lines`（被合併掉的行數）、`removed_blank_lines`、`original_lines`、`filtered_lines`。沒有雜訊的 log 會逐位元組原樣回傳且所有計數為 0。`size`、`sha256`、`offset`、`returned_bytes` 與 `truncated` 永遠描述原始位元組，不受過濾影響。lossy: use `filter=none` when exact bytes matter; `sha256` always covers the raw log.
+
+`forgejo_get_action_run_logs` 預設只回傳索引：每個檔案的 `name`、`size` 與 `sha256`。`include_content=true` 時另回傳每個檔案結尾的視窗（`content`、`offset`、`returned_bytes`、`truncated`），每檔最多 `max_bytes_per_file`（預設 65536，上限 1048576）；`filter`（`none` | `ci`，預設 `none`）與上述相同，逐檔套用於每個已切好的視窗，並在每個檔案項目上附加 `filter_stats`；沒有 `include_content` 時 `filter` 無作用。ZIP 最大接受 10 MiB，最多處理 100 個檔案且合計最多回傳 1 MiB 文字；ZIP 只在記憶體中讀取，永不解壓到磁碟。`forgejo_delete_action_run` 只適用於 Forgejo 允許刪除的已完成 run。Forgejo v16 沒有公開 PAT REST rerun endpoint，因此不提供 rerun 工具。
 
 ## 6. Audit 規格
 

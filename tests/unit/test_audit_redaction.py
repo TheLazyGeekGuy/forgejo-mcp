@@ -192,6 +192,35 @@ def test_extract_target_includes_action_identifiers() -> None:
     }
 
 
+def test_action_log_window_arguments_are_audited_without_redaction() -> None:
+    arguments = {
+        "owner": "patrick",
+        "repo": "forgejo-mcp",
+        "job_id": 51,
+        "attempt": 2,
+        "max_bytes": 65536,
+        "from_end": True,
+        "offset": 128,
+        "grep": "error",
+        "filter": "ci",
+        "run_id": 42,
+        "include_content": False,
+        "max_bytes_per_file": 4096,
+    }
+
+    result = redact_arguments(arguments)
+
+    assert result.value == arguments
+    assert result.truncated is False
+    assert extract_target(arguments) == {
+        "owner": "patrick",
+        "repo": "forgejo-mcp",
+        "run_id": 42,
+        "job_id": 51,
+        "attempt": 2,
+    }
+
+
 def test_extract_target_redacts_credentials_and_bounds_text() -> None:
     marker = "must-not-reach-target"
     target = extract_target(

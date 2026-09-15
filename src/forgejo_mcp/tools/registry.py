@@ -75,6 +75,28 @@ def _repository_schema() -> dict[str, Any]:
     )
 
 
+def _list_item_schema(
+    schema: dict[str, Any],
+    *,
+    truncation_flag: str,
+    after: str,
+    optional: tuple[str, ...] = ("html_url",),
+    user_schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Derive a list item schema: a required truncation flag placed after the bounded
+    text field, link fields optional (omitted in the compact form) and lean users."""
+    properties: dict[str, Any] = {}
+    for name, value in schema["properties"].items():
+        if user_schema is not None and name in {"user", "assignees"}:
+            value = user_schema if name == "user" else {"type": "array", "items": user_schema}
+        properties[name] = value
+        if name == after:
+            properties[truncation_flag] = {"type": "boolean"}
+    required = [name for name in schema["required"] if name not in optional]
+    required.insert(required.index(after) + 1, truncation_flag)
+    return _object_schema(properties, required)
+
+
 def _page_schema(item_schema: dict[str, Any]) -> dict[str, Any]:
     return _object_schema(
         {
@@ -101,6 +123,14 @@ _REPO = {
 }
 _PAGE = {"type": "integer", "minimum": 1, "maximum": 100000, "default": 1}
 _LIMIT = {"type": "integer", "minimum": 1, "maximum": 100, "default": 30}
+_FIELDS = {"type": "string", "enum": ["compact", "full"], "default": "compact"}
+_FIELDS_DESCRIPTION = (
+    " `fields=compact` (default) bounds long text to a 200-character excerpt and omits"
+    " `html_url`/`avatar_url`; `fields=full` returns complete items."
+)
+_REPOSITORY_LIST_SCHEMA = _list_item_schema(
+    _repository_schema(), truncation_flag="description_truncated", after="description"
+)
 _BRANCH_SCHEMA = _object_schema(
     {
         "name": {"type": "string"},
@@ -168,6 +198,14 @@ _OPTIONAL_ROOT_FILE_PATH = {
     "oneOf": [_FILE_PATH, {"type": "string", "const": ""}],
     "description": "Omit this field or use an empty string to list the repository root.",
 }
+_DIFF_PATHS = {"type": "array", "items": _FILE_PATH, "minItems": 1, "maxItems": 50}
+_DIFF_MAX_BYTES = {
+    "type": "integer",
+    "minimum": 1,
+    "maximum": 2 * 1024 * 1024,
+    "default": 64 * 1024,
+}
+_DIFF_OFFSET = {"type": "integer", "minimum": 0, "default": 0}
 _NUMBER = {"type": "integer", "minimum": 1}
 _TIMESTAMP = {"type": "string", "format": "date-time"}
 _TITLE = {"type": "string", "minLength": 1, "maxLength": 255}
@@ -181,6 +219,9 @@ _USER_SCHEMA = _object_schema(
         "avatar_url": {"type": ["string", "null"]},
     },
     ["id", "username", "display_name", "avatar_url"],
+)
+_USER_LIST_SCHEMA = _object_schema(
+    dict(_USER_SCHEMA["properties"]), ["id", "username", "display_name"]
 )
 _LABEL_SCHEMA = _object_schema(
     {"id": {"type": "integer"}, "name": {"type": "string"}, "color": {"type": "string"}},
@@ -283,6 +324,12 @@ _COMMENT_SCHEMA = _object_schema(
     },
     ["id", "body", "html_url", "user", "created_at", "updated_at"],
 )
+_ISSUE_LIST_SCHEMA = _list_item_schema(
+    _ISSUE_SCHEMA, truncation_flag="body_truncated", after="body", user_schema=_USER_LIST_SCHEMA
+)
+_COMMENT_LIST_SCHEMA = _list_item_schema(
+    _COMMENT_SCHEMA, truncation_flag="body_truncated", after="body", user_schema=_USER_LIST_SCHEMA
+)
 _PULL_REF_SCHEMA = _object_schema(
     {"ref": {"type": "string"}, "sha": {"type": "string"}, "repository": {"type": "string"}},
     ["ref", "sha", "repository"],
@@ -332,6 +379,9 @@ _PR_SCHEMA = _object_schema(
         "deletions",
         "changed_files",
     ],
+)
+_PR_LIST_SCHEMA = _list_item_schema(
+    _PR_SCHEMA, truncation_flag="body_truncated", after="body", user_schema=_USER_LIST_SCHEMA
 )
 
 _CONTENT_ENTRY_SCHEMA = _object_schema(
@@ -466,6 +516,84 @@ _ACTION_ARTIFACT_SCHEMA = _object_schema(
         "updated_at",
     ],
 )
+_ACTION_LOG_WINDOW_BYTES = {
+    "type": "integer",
+    "minimum": 1,
+    "maximum": 1024 * 1024,
+    "default": 64 * 1024,
+    "description": "Maximum number of log bytes to return; the window is cut on line boundaries.",
+}
+_ACTION_LOG_FROM_END = {
+    "type": "boolean",
+    "default": True,
+    "description": "Return the end of the log (where failures usually are) instead of its start.",
+}
+_ACTION_LOG_OFFSET = {
+    "type": "integer",
+    "minimum": 0,
+    "default": 0,
+    "description": (
+        "Byte offset to skip, counted from the end when from_end is true and from the start "
+        "otherwise; a window never starts mid-line when a newline is available."
+    ),
+}
+_ACTION_LOG_GREP = {
+    "type": "string",
+    "maxLength": 256,
+    "description": (
+        "Case-insensitive substring filter: only matching lines are returned, each prefixed "
+        "with its 1-based line number; max_bytes, from_end and offset apply to the filtered "
+        "text. An empty string disables the filter."
+    ),
+}
+_ACTION_LOG_INCLUDE_CONTENT = {
+    "type": "boolean",
+    "default": False,
+    "description": "Include a bounded window of each file; by default only the index is returned.",
+}
+_ACTION_LOG_PER_FILE_BYTES = {
+    "type": "integer",
+    "minimum": 1,
+    "maximum": 1024 * 1024,
+    "default": 64 * 1024,
+    "description": "Maximum bytes returned per file (its end) when include_content is true.",
+}
+_ACTION_LOG_FILTER = {
+    "type": "string",
+    "enum": ["none", "ci"],
+    "default": "none",
+    "description": (
+        "Opt-in noise filter applied to the returned window only, after max_bytes/from_end/"
+        "offset/grep: 'ci' strips ANSI escape sequences, carriage-return rewrites, leading "
+        "timestamps (ISO 8601, [HH:MM:SS], HH:MM:SS.mmm), folds runs of identical lines into "
+        "one suffixed [×N] and runs of blank lines into one, and reports filter_stats. Lossy: "
+        "use 'none' when exact bytes matter; sha256, size, offset and returned_bytes always "
+        "describe the raw log."
+    ),
+}
+_ACTION_LOG_FILTER_STATS = _object_schema(
+    {
+        name: {"type": "integer", "minimum": 0}
+        for name in (
+            "removed_ansi",
+            "removed_carriage_returns",
+            "removed_timestamps",
+            "collapsed_lines",
+            "removed_blank_lines",
+            "original_lines",
+            "filtered_lines",
+        )
+    },
+    [
+        "removed_ansi",
+        "removed_carriage_returns",
+        "removed_timestamps",
+        "collapsed_lines",
+        "removed_blank_lines",
+        "original_lines",
+        "filtered_lines",
+    ],
+)
 _ACTION_LOG_SCHEMA = _object_schema(
     {
         "job_id": _NUMBER,
@@ -473,9 +601,12 @@ _ACTION_LOG_SCHEMA = _object_schema(
         "size": {"type": "integer", "minimum": 0},
         "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "content": {"type": "string"},
+        "offset": {"type": "integer", "minimum": 0},
+        "returned_bytes": {"type": "integer", "minimum": 0},
         "truncated": {"type": "boolean"},
+        "filter_stats": _ACTION_LOG_FILTER_STATS,
     },
-    ["job_id", "attempt", "size", "sha256", "content", "truncated"],
+    ["job_id", "attempt", "size", "sha256", "content", "offset", "returned_bytes", "truncated"],
 )
 _ACTION_LOG_FILE_SCHEMA = _object_schema(
     {
@@ -483,9 +614,12 @@ _ACTION_LOG_FILE_SCHEMA = _object_schema(
         "size": {"type": "integer", "minimum": 0},
         "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "content": {"type": "string"},
+        "offset": {"type": "integer", "minimum": 0},
+        "returned_bytes": {"type": "integer", "minimum": 0},
         "truncated": {"type": "boolean"},
+        "filter_stats": _ACTION_LOG_FILTER_STATS,
     },
-    ["name", "size", "sha256", "content", "truncated"],
+    ["name", "size", "sha256"],
 )
 
 _MIGRATION_BOOLEAN = {"type": "boolean"}
@@ -596,12 +730,14 @@ _TOOL_SPECS = (
     ToolSpec(
         name="forgejo_list_repositories",
         title="List repositories",
-        description="List repositories visible to the token owner's Forgejo PAT.",
+        description="List repositories visible to the token owner's Forgejo PAT."
+        + _FIELDS_DESCRIPTION,
         risk="read",
         input_schema=_object_schema(
             {
                 "page": _PAGE,
                 "limit": _LIMIT,
+                "fields": _FIELDS,
                 "order_by": {
                     "type": "string",
                     "enum": [
@@ -625,7 +761,7 @@ _TOOL_SPECS = (
             },
             [],
         ),
-        output_schema=_page_schema(_repository_schema()),
+        output_schema=_page_schema(_REPOSITORY_LIST_SCHEMA),
     ),
     ToolSpec(
         name="forgejo_get_repository",
@@ -869,7 +1005,7 @@ _TOOL_SPECS = (
     ToolSpec(
         name="forgejo_list_issues",
         title="List issues",
-        description="List repository issues.",
+        description="List repository issues." + _FIELDS_DESCRIPTION,
         risk="read",
         input_schema=_object_schema(
             {
@@ -904,10 +1040,11 @@ _TOOL_SPECS = (
                 },
                 "page": _PAGE,
                 "limit": _LIMIT,
+                "fields": _FIELDS,
             },
             ["owner", "repo"],
         ),
-        output_schema=_page_schema(_ISSUE_SCHEMA),
+        output_schema=_page_schema(_ISSUE_LIST_SCHEMA),
     ),
     ToolSpec(
         name="forgejo_get_issue",
@@ -922,7 +1059,7 @@ _TOOL_SPECS = (
     ToolSpec(
         name="forgejo_list_issue_comments",
         title="List issue comments",
-        description="Return bounded issue or pull request comments.",
+        description="Return bounded issue or pull request comments." + _FIELDS_DESCRIPTION,
         risk="read-sensitive",
         input_schema=_object_schema(
             {
@@ -931,12 +1068,13 @@ _TOOL_SPECS = (
                 "number": _NUMBER,
                 "since": _TIMESTAMP,
                 "before": _TIMESTAMP,
+                "fields": _FIELDS,
             },
             ["owner", "repo", "number"],
         ),
         output_schema=_object_schema(
             {
-                "items": {"type": "array", "items": _COMMENT_SCHEMA, "maxItems": 100},
+                "items": {"type": "array", "items": _COMMENT_LIST_SCHEMA, "maxItems": 100},
                 "truncated": {"type": "boolean"},
             },
             ["items", "truncated"],
@@ -945,7 +1083,7 @@ _TOOL_SPECS = (
     ToolSpec(
         name="forgejo_list_pull_requests",
         title="List pull requests",
-        description="List repository pull requests.",
+        description="List repository pull requests." + _FIELDS_DESCRIPTION,
         risk="read",
         input_schema=_object_schema(
             {
@@ -971,10 +1109,11 @@ _TOOL_SPECS = (
                 },
                 "page": _PAGE,
                 "limit": _LIMIT,
+                "fields": _FIELDS,
             },
             ["owner", "repo"],
         ),
-        output_schema=_page_schema(_PR_SCHEMA),
+        output_schema=_page_schema(_PR_LIST_SCHEMA),
     ),
     ToolSpec(
         name="forgejo_get_pull_request",
@@ -1006,20 +1145,52 @@ _TOOL_SPECS = (
     ToolSpec(
         name="forgejo_get_pull_request_diff",
         title="Get pull request diff",
-        description="Return a bounded pull request diff.",
+        description=(
+            "Return a bounded, windowed pull request diff. Use forgejo_get_pull_request_files "
+            "first to list changed paths, then request only the paths you need. `paths` keeps "
+            "only the matching `diff --git` sections (renames match either name); `max_bytes` "
+            "(default 65536) and `offset` page through the filtered diff on line boundaries; "
+            "continue from `offset + returned_bytes` while `truncated` is true."
+        ),
         risk="read-sensitive",
         input_schema=_object_schema(
-            {"owner": _OWNER, "repo": _REPO, "number": _NUMBER}, ["owner", "repo", "number"]
+            {
+                "owner": _OWNER,
+                "repo": _REPO,
+                "number": _NUMBER,
+                "paths": _DIFF_PATHS,
+                "max_bytes": _DIFF_MAX_BYTES,
+                "offset": _DIFF_OFFSET,
+            },
+            ["owner", "repo", "number"],
         ),
         output_schema=_object_schema(
             {
                 "number": _NUMBER,
                 "format": {"const": "diff"},
                 "size": {"type": "integer", "minimum": 0},
+                "total_size": {"type": "integer", "minimum": 0},
+                "offset": _DIFF_OFFSET,
+                "returned_bytes": {"type": "integer", "minimum": 0},
+                "truncated": {"type": "boolean"},
+                "files_included": {"type": "array", "items": _FILE_PATH},
+                "files_missing": {"type": "array", "items": _FILE_PATH, "maxItems": 50},
                 "sha256": {"type": "string"},
                 "content": {"type": "string"},
             },
-            ["number", "format", "size", "sha256", "content"],
+            [
+                "number",
+                "format",
+                "size",
+                "total_size",
+                "offset",
+                "returned_bytes",
+                "truncated",
+                "files_included",
+                "files_missing",
+                "sha256",
+                "content",
+            ],
         ),
     ),
     ToolSpec(
@@ -1524,7 +1695,11 @@ _TOOL_SPECS = (
     ToolSpec(
         name="forgejo_get_action_job_log",
         title="Get action job log",
-        description="Return up to 1 MiB of plaintext log content for an action job attempt.",
+        description=(
+            "Return a bounded window of plaintext log content for an action job attempt: "
+            "the last 64 KiB by default, up to 1 MiB, with head/tail offsets, an optional "
+            "case-insensitive line filter and an opt-in CI noise filter."
+        ),
         risk="read-sensitive",
         input_schema=_object_schema(
             {
@@ -1532,6 +1707,11 @@ _TOOL_SPECS = (
                 "repo": _REPO,
                 "job_id": _NUMBER,
                 "attempt": _NUMBER,
+                "max_bytes": _ACTION_LOG_WINDOW_BYTES,
+                "from_end": _ACTION_LOG_FROM_END,
+                "offset": _ACTION_LOG_OFFSET,
+                "grep": _ACTION_LOG_GREP,
+                "filter": _ACTION_LOG_FILTER,
             },
             ["owner", "repo", "job_id"],
         ),
@@ -1540,10 +1720,21 @@ _TOOL_SPECS = (
     ToolSpec(
         name="forgejo_get_action_run_logs",
         title="Get action run logs",
-        description="Return bounded plaintext files extracted from an action run log archive.",
+        description=(
+            "Return an index (name, size, SHA-256) of the files in an action run log archive; "
+            "with include_content, also return a bounded tail window of each file, optionally "
+            "passed through the CI noise filter."
+        ),
         risk="read-sensitive",
         input_schema=_object_schema(
-            {"owner": _OWNER, "repo": _REPO, "run_id": _NUMBER},
+            {
+                "owner": _OWNER,
+                "repo": _REPO,
+                "run_id": _NUMBER,
+                "include_content": _ACTION_LOG_INCLUDE_CONTENT,
+                "max_bytes_per_file": _ACTION_LOG_PER_FILE_BYTES,
+                "filter": _ACTION_LOG_FILTER,
+            },
             ["owner", "repo", "run_id"],
         ),
         output_schema=_object_schema(
