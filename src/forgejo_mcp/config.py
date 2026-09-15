@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     trusted_proxy_cidrs: list[str] = Field(default_factory=list)
     mcp_request_max_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, le=16 * 1024 * 1024)
     mcp_allowed_origins: list[str] = Field(default_factory=list)
+    mcp_structured_output: bool = True
     commit_max_files: int = Field(default=100, ge=1, le=100)
     commit_max_total_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024)
     forgejo_connect_timeout_seconds: float = Field(default=5.0, ge=0.1, le=30.0)

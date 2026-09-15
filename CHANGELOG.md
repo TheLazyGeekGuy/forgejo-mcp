@@ -16,6 +16,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Added
 
+- Compact single-pass JSON serialization of MCP tool results (no indentation, UTF-8 preserved) in place of the SDK's indented text block.
+- `FMCP_MCP_STRUCTURED_OUTPUT` setting (default `true`) that, when `false`, omits `outputSchema` from `tools/list` and `structuredContent` from `tools/call` together to reduce token usage.
 - Optional OAuth 2.1 authorization-code server with PKCE S256, exact redirect registration, RFC 8707 resource binding, RFC 9728 metadata, public-client DCR, allowlisted CIMD, local login and explicit consent.
 - Short-lived OAuth access tokens using the existing MCP permission engine, rotating refresh tokens with family-wide reuse detection/revocation, and one-time authorization codes.
 - PostgreSQL OAuth integration and full Docker E2E coverage for discovery, DCR, login, consent, MCP `2025-06-18`, permission intersection, refresh rotation and revocation on Forgejo 16.0.2 and 16.0.3.

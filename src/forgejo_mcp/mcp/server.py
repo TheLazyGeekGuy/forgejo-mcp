@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 import uuid
 from collections.abc import Callable
@@ -47,8 +48,11 @@ from forgejo_mcp.observability.metrics import (
     RATE_LIMITED,
 )
 from forgejo_mcp.tools import get_tool, list_tools
+from forgejo_mcp.tools.registry import ToolSpec
 
 SessionFactoryProvider = Callable[[], async_sessionmaker[AsyncSession]]
+ToolResultContent = list[TextContent]
+ToolResult = ToolResultContent | tuple[ToolResultContent, dict[str, Any]]
 
 
 class McpHttpApplication:
@@ -147,26 +151,14 @@ def build_mcp_runtime(
                 decision = decisions[spec.name]
                 if decision.allowed:
                     visible.append(
-                        Tool(
-                            name=spec.name,
-                            title=spec.title,
-                            description=spec.description,
-                            inputSchema=spec.input_schema,
-                            outputSchema=spec.output_schema,
-                            annotations=ToolAnnotations(
-                                readOnlyHint=spec.risk != "write",
-                                destructiveHint=False,
-                                idempotentHint=spec.risk != "write",
-                                openWorldHint=True,
-                            ),
+                        build_tool_definition(
+                            spec, structured_output=settings.mcp_structured_output
                         )
                     )
         return visible
 
     @server.call_tool(validate_input=False)  # type: ignore[untyped-decorator]
-    async def handle_call_tool(
-        name: str, arguments: dict[str, Any]
-    ) -> dict[str, Any] | CallToolResult:
+    async def handle_call_tool(name: str, arguments: dict[str, Any]) -> ToolResult | CallToolResult:
         started = time.monotonic()
         outcome = "failed"
         spec = get_tool(name)
@@ -219,7 +211,9 @@ def build_mcp_runtime(
                         return _tool_error(_safe_error_message(error))
                     await audit.complete_success(invocation, result)
                     outcome = "succeeded"
-                    return result
+                    return serialize_tool_result(
+                        result, structured_output=settings.mcp_structured_output
+                    )
                 finally:
                     reset_invocation_id(invocation_context)
         except ServiceShuttingDown:
@@ -751,6 +745,44 @@ def _page_result(result: Any) -> dict[str, Any]:
         "limit": result.limit,
         "has_more": result.has_more,
     }
+
+
+def build_tool_definition(spec: ToolSpec, *, structured_output: bool) -> Tool:
+    """Advertise a tool; the output schema is announced only when structured output is on.
+
+    The MCP SDK validates ``structuredContent`` against ``outputSchema`` whenever the
+    latter is announced, so both must be present or absent together.
+    """
+    return Tool(
+        name=spec.name,
+        title=spec.title,
+        description=spec.description,
+        inputSchema=spec.input_schema,
+        outputSchema=spec.output_schema if structured_output else None,
+        annotations=ToolAnnotations(
+            readOnlyHint=spec.risk != "write",
+            destructiveHint=False,
+            idempotentHint=spec.risk != "write",
+            openWorldHint=True,
+        ),
+    )
+
+
+def serialize_tool_result(result: dict[str, Any], *, structured_output: bool) -> ToolResult:
+    """Render a tool result once, as compact JSON text.
+
+    Returning a plain ``dict`` would make the SDK emit ``json.dumps(indent=2)`` text next to
+    ``structuredContent``; the compact text carries the same payload with fewer tokens.
+    """
+    content: ToolResultContent = [
+        TextContent(
+            type="text",
+            text=json.dumps(result, separators=(",", ":"), ensure_ascii=False),
+        )
+    ]
+    if structured_output:
+        return content, result
+    return content
 
 
 def _tool_error(message: str) -> CallToolResult:

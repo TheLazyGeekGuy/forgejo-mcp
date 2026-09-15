@@ -98,6 +98,12 @@ Forgejo MCP 不接受 query-string authentication。Token 必須以 Bearer token
 
 如果 request 帶有 HTTP `Origin` header，該 origin 必須經過標準化後與 deployment 的 `FMCP_MCP_ALLOWED_ORIGINS` JSON 清單中某個值完全相同，否則會被拒絕。Native MCP client 通常不會傳送此 header。只在有意使用瀏覽器 MCP client 時才設定此 allowlist；不支援 wildcard origin。
 
+## 工具結果大小
+
+每次成功的工具呼叫都會以精簡 JSON 文字（不縮排、保留 UTF-8 字元）回傳一次結果；預設還會再以符合工具 `outputSchema` 的 MCP `structuredContent` 回傳第二次。只解析文字的 client 會為同一份內容付出兩倍 token，而 50 個 output schema 約占 `tools/list` 回應的一半。
+
+設定 `FMCP_MCP_STRUCTURED_OUTPUT=false` 可同時關閉兩者：`tools/list` 不再包含 `outputSchema`，`tools/call` 只回傳精簡文字區塊。預設值 `true` 會維持目前的合約，供依賴 structured output 的 client 使用。這兩者無法分開設定，因為只要宣告了 schema，MCP SDK 就會用 `outputSchema` 驗證 `structuredContent`。
+
 ## 確認連線
 
 儲存設定後：
