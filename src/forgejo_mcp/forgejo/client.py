@@ -17,6 +17,7 @@ from urllib.parse import SplitResult, quote, urlsplit, urlunsplit
 import httpx
 
 from forgejo_mcp.application.errors import ExternalServiceUnavailable, NotFound, ValidationFailed
+from forgejo_mcp.forgejo.log_filter import filter_ci_log
 from forgejo_mcp.forgejo.models import (
     BranchSummary,
     CommentSummary,
@@ -60,6 +61,7 @@ MAX_DIFF_BYTES = 2 * 1024 * 1024
 MAX_ACTION_LOG_BYTES = 1024 * 1024
 DEFAULT_ACTION_LOG_WINDOW_BYTES = 64 * 1024
 MAX_ACTION_LOG_GREP_LENGTH = 256
+ACTION_LOG_FILTERS = ("none", "ci")
 MAX_ACTION_LOG_ARCHIVE_BYTES = 10 * 1024 * 1024
 MAX_ACTION_LOG_FILES = 100
 MAX_FORGEJO_RESPONSE_BYTES = MAX_ACTION_LOG_ARCHIVE_BYTES
@@ -1325,10 +1327,12 @@ class ForgejoClient:
         from_end: bool = True,
         offset: int = 0,
         grep: str | None = None,
+        log_filter: str = "none",
     ) -> dict[str, Any]:
         window_bytes = _log_window_size(max_bytes, "max_bytes")
         window_offset = _log_window_offset(offset)
         needle = _log_grep(grep)
+        noise_filter = _log_filter(log_filter)
         params = {"attempt": _positive_id(attempt, "attempt")} if attempt is not None else None
         response = await self._request(
             method="GET",
@@ -1348,7 +1352,7 @@ class ForgejoClient:
         window, start = _log_window(
             source, max_bytes=window_bytes, from_end=from_end, offset=window_offset
         )
-        return {
+        result = {
             "job_id": job_id,
             "attempt": attempt,
             "size": len(content),
@@ -1358,6 +1362,7 @@ class ForgejoClient:
             "returned_bytes": len(window),
             "truncated": len(window) < len(source),
         }
+        return _apply_log_filter(result, noise_filter)
 
     async def get_action_run_logs(
         self,
@@ -1370,8 +1375,10 @@ class ForgejoClient:
         run_id: int,
         include_content: bool = False,
         max_bytes_per_file: int = DEFAULT_ACTION_LOG_WINDOW_BYTES,
+        log_filter: str = "none",
     ) -> dict[str, Any]:
         per_file_bytes = _log_window_size(max_bytes_per_file, "max_bytes_per_file")
+        noise_filter = _log_filter(log_filter)
         response = await self._request(
             method="GET",
             endpoint=self._repo_endpoint(
@@ -1426,7 +1433,7 @@ class ForgejoClient:
                             "truncated": len(window) < len(content),
                         }
                     )
-                    files.append(item)
+                    files.append(_apply_log_filter(item, noise_filter))
                     remaining -= len(window)
                     if remaining == 0:
                         files_truncated = len(entries) > len(files) or len(content) > len(window)
@@ -2383,6 +2390,27 @@ def _log_grep(value: str | None) -> str | None:
     if not isinstance(value, str) or len(value) > MAX_ACTION_LOG_GREP_LENGTH:
         raise ValidationFailed(f"grep must be at most {MAX_ACTION_LOG_GREP_LENGTH} characters")
     return value
+
+
+def _log_filter(value: str) -> str:
+    if not isinstance(value, str) or value not in ACTION_LOG_FILTERS:
+        raise ValidationFailed(f"filter must be one of {', '.join(ACTION_LOG_FILTERS)}")
+    return value
+
+
+def _apply_log_filter(item: dict[str, Any], noise_filter: str) -> dict[str, Any]:
+    """Replace ``item["content"]`` by its filtered form and declare what was removed.
+
+    The filter runs on the already cut window, never on the raw log, so ``offset``,
+    ``returned_bytes``, ``size`` and ``sha256`` keep describing the raw bytes. With
+    ``"none"`` the item is returned untouched and carries no ``filter_stats``.
+    """
+    if noise_filter == "none":
+        return item
+    filtered = filter_ci_log(item["content"])
+    item["content"] = filtered.text
+    item["filter_stats"] = filtered.stats()
+    return item
 
 
 def _grep_log_lines(content: bytes, needle: str) -> bytes:

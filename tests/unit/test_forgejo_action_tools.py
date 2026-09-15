@@ -339,6 +339,94 @@ async def test_job_log_rejects_out_of_range_window_arguments(arguments: dict[str
         await client.get_action_job_log(**_COMMON, job_id=51, attempt=None, **arguments)
 
 
+_NOISY_LOG = (
+    b"2026-08-18T10:00:01.000000000Z \x1b[1mSetup\x1b[0m\n"
+    b"2026-08-18T10:00:02.000000000Z retry\n"
+    b"2026-08-18T10:00:03.000000000Z retry\n"
+    b"2026-08-18T10:00:04.000000000Z \x1b[32mdone\x1b[0m\n"
+)
+
+
+async def test_job_log_ci_filter_cleans_the_window_and_reports_its_stats() -> None:
+    client = _log_client(_NOISY_LOG)
+
+    filtered = await client.get_action_job_log(**_COMMON, job_id=51, attempt=None, log_filter="ci")
+
+    assert filtered["content"] == "Setup\nretry [\u00d72]\ndone\n"
+    assert filtered["size"] == len(_NOISY_LOG)
+    assert filtered["sha256"] == hashlib.sha256(_NOISY_LOG).hexdigest()
+    assert filtered["offset"] == 0
+    assert filtered["returned_bytes"] == len(_NOISY_LOG)
+    assert filtered["truncated"] is False
+    assert filtered["filter_stats"] == {
+        "removed_ansi": 4,
+        "removed_carriage_returns": 0,
+        "removed_timestamps": 4,
+        "collapsed_lines": 1,
+        "removed_blank_lines": 0,
+        "original_lines": 4,
+        "filtered_lines": 3,
+    }
+
+
+async def test_job_log_filter_none_is_the_default_and_adds_nothing() -> None:
+    client = _log_client(_NOISY_LOG)
+
+    default = await client.get_action_job_log(**_COMMON, job_id=51, attempt=None)
+    explicit = await client.get_action_job_log(
+        **_COMMON, job_id=51, attempt=None, log_filter="none"
+    )
+
+    assert default == explicit
+    assert default["content"] == _NOISY_LOG.decode()
+    assert "filter_stats" not in default
+
+
+async def test_job_log_ci_filter_applies_after_the_window_not_before() -> None:
+    line = b"2026-08-18T10:00:01.000000000Z msg\n"
+    assert len(line) == 35
+    log = line * 3
+    client = _log_client(log)
+
+    tail = await client.get_action_job_log(
+        **_COMMON, job_id=51, attempt=None, max_bytes=40, log_filter="ci"
+    )
+    head = await client.get_action_job_log(
+        **_COMMON, job_id=51, attempt=None, max_bytes=40, from_end=False, log_filter="ci"
+    )
+
+    # A 40-byte window holds one raw line; filtering first would have let three 4-byte
+    # lines through. offset/returned_bytes/truncated stay defined on the raw bytes.
+    assert tail["content"] == "msg\n"
+    assert (tail["offset"], tail["returned_bytes"], tail["truncated"]) == (70, 35, True)
+    assert tail["filter_stats"]["original_lines"] == 1
+    assert head["content"] == "msg\n"
+    assert (head["offset"], head["returned_bytes"], head["truncated"]) == (0, 35, True)
+
+
+async def test_job_log_ci_filter_applies_to_grep_output() -> None:
+    client = _log_client(_NOISY_LOG)
+
+    matches = await client.get_action_job_log(
+        **_COMMON, job_id=51, attempt=None, grep="retry", log_filter="ci"
+    )
+
+    # Line-number prefixes come first, so the strict leading-timestamp rule does not fire
+    # and numbered lines never fold; ANSI stripping still applies.
+    assert matches["content"] == (
+        "2: 2026-08-18T10:00:02.000000000Z retry\n3: 2026-08-18T10:00:03.000000000Z retry\n"
+    )
+    assert matches["filter_stats"]["removed_timestamps"] == 0
+    assert matches["filter_stats"]["collapsed_lines"] == 0
+
+
+async def test_job_log_rejects_an_unknown_filter() -> None:
+    client = _log_client(b"ok\n")
+
+    with pytest.raises(ValidationFailed):
+        await client.get_action_job_log(**_COMMON, job_id=51, attempt=None, log_filter="all")
+
+
 async def test_run_logs_return_an_index_only_by_default() -> None:
     files = {"test-51-attempt-1.log": "tests passed\n", "lint-52-attempt-1.log": "lint passed\n"}
     archive_bytes = _archive(files)
@@ -381,6 +469,47 @@ async def test_run_logs_include_content_is_bounded_per_file_from_the_end() -> No
     assert run_logs["files_truncated"] is False
     assert [item["content"] for item in whole["files"]] == list(files.values())
     assert all(item["truncated"] is False for item in whole["files"])
+
+
+async def test_run_logs_ci_filter_applies_per_file_after_the_window() -> None:
+    files = {
+        "test-51-attempt-1.log": _NOISY_LOG.decode(),
+        "lint-52-attempt-1.log": "\x1b[32mlint passed\x1b[0m\n",
+    }
+    client = _log_client(b"", _archive(files))
+
+    filtered = await client.get_action_run_logs(
+        **_COMMON, run_id=42, include_content=True, log_filter="ci"
+    )
+    windowed = await client.get_action_run_logs(
+        **_COMMON, run_id=42, include_content=True, max_bytes_per_file=48, log_filter="ci"
+    )
+    index = await client.get_action_run_logs(**_COMMON, run_id=42, log_filter="ci")
+    plain = await client.get_action_run_logs(**_COMMON, run_id=42, include_content=True)
+
+    test_log, lint_log = filtered["files"]
+    assert test_log["content"] == "Setup\nretry [\u00d72]\ndone\n"
+    assert test_log["sha256"] == hashlib.sha256(_NOISY_LOG).hexdigest()
+    assert (test_log["size"], test_log["returned_bytes"]) == (len(_NOISY_LOG), len(_NOISY_LOG))
+    assert test_log["filter_stats"]["collapsed_lines"] == 1
+    assert lint_log["content"] == "lint passed\n"
+    assert lint_log["filter_stats"]["removed_ansi"] == 2
+    assert windowed["files"][0]["content"] == "done\n"
+    last_line = _NOISY_LOG[_NOISY_LOG.rstrip(b"\n").rfind(b"\n") + 1 :]
+    assert len(last_line) == 45
+    assert windowed["files"][0]["offset"] == len(_NOISY_LOG) - 45
+    assert windowed["files"][0]["returned_bytes"] == 45
+    assert windowed["files"][0]["truncated"] is True
+    assert all("filter_stats" not in item and "content" not in item for item in index["files"])
+    assert all("filter_stats" not in item for item in plain["files"])
+    assert [item["content"] for item in plain["files"]] == list(files.values())
+
+
+async def test_run_logs_reject_an_unknown_filter() -> None:
+    client = _log_client(b"", _archive({"a.log": "ok\n"}))
+
+    with pytest.raises(ValidationFailed):
+        await client.get_action_run_logs(**_COMMON, run_id=42, log_filter="raw")
 
 
 async def test_run_logs_keep_the_shared_one_mib_budget_and_file_limit() -> None:
