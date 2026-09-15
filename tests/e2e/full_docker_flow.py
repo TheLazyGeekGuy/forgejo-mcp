@@ -771,6 +771,19 @@ def run_mcp_flow(mcp_tokens: dict[str, str]) -> None:
     assert diff["format"] == "diff"
     assert "src/greeting.py" in diff["content"]
     assert "tests/test_greeting.py" in diff["content"]
+    assert diff["truncated"] is False
+    assert diff["size"] == diff["total_size"] == diff["returned_bytes"]
+    windowed_diff = developer.call(
+        "forgejo_get_pull_request_diff",
+        {**repository, "number": pull["number"], "paths": ["src/greeting.py", "missing.txt"]},
+    )
+    assert windowed_diff["files_included"] == ["src/greeting.py"]
+    assert windowed_diff["files_missing"] == ["missing.txt"]
+    assert windowed_diff["sha256"] == diff["sha256"]
+    assert windowed_diff["total_size"] == diff["total_size"]
+    assert windowed_diff["size"] < diff["size"]
+    assert "src/greeting.py" in windowed_diff["content"]
+    assert "tests/test_greeting.py" not in windowed_diff["content"]
     files = developer.call(
         "forgejo_get_pull_request_files",
         {**repository, "number": pull["number"]},
