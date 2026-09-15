@@ -6,6 +6,10 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ## [Unreleased]
 
+### Changed
+
+- `forgejo_list_repositories`, `forgejo_list_issues`, `forgejo_list_issue_comments` and `forgejo_list_pull_requests` accept an optional `fields` selector (`compact` | `full`, default `compact`). Compact items bound `body` (repository `description`) to a 200-character excerpt cut on a word or line boundary with a required `body_truncated`/`description_truncated` flag, and omit `html_url` and `avatar_url`; `full` returns complete items. Unitary `get_*` tools are unchanged. A page of 30 issues with 4 KiB bodies shrinks by about 86 %.
+
 ### Fixed
 
 - Decode compressed Forgejo response bodies exactly once while preserving decompressed-size limits for `gzip` and `deflate` responses.
