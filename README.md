@@ -134,7 +134,7 @@ OAuth clients use local Forgejo MCP login and explicit time-bounded consent; the
 | Inspect tool inputs and behavior | [v1 tool catalog](docs/tools/v1-tool-catalog.md) |
 | Review credential handling | [Credential security](docs/security/credentials.md) |
 | Review Forgejo 16.0.3 evidence | [Forgejo 16.0.3 compatibility report](docs/forgejo-16.0.3-compatibility.md) |
-| Read the independent security audit and remediation | [External audit, 2026-09-02 (French)](docs/security/audit-externe-2026-09-02.fr.md) |
+| Read the independent security audit and remediation | [External audit, 2026-09-02](docs/security/external-audit-2026-09-02.md) |
 | Prepare an independent review | [Third-party review handoff](docs/security/third-party-review.md) |
 
 ## Development and verification

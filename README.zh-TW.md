@@ -132,7 +132,7 @@ OAuth client 會使用本地 Forgejo MCP 帳號登入並提供有期限的明確
 | 確認目前限制 | [已知限制](docs/known-limitations.zh-TW.md) |
 | 查詢工具 input 與行為 | [v1 工具目錄](docs/tools/v1-tool-catalog.md) |
 | 檢視 credential 處理方式 | [Credential security](docs/security/credentials.md) |
-| 閱讀獨立安全稽核與修復結果 | [External audit, 2026-09-02（法文）](docs/security/audit-externe-2026-09-02.fr.md) |
+| 閱讀獨立安全稽核與修復結果 | [External audit, 2026-09-02](docs/security/external-audit-2026-09-02.md) |
 | 準備獨立審查 | [Third-party review handoff](docs/security/third-party-review.md) |
 
 ## 開發與驗證

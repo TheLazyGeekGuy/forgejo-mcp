@@ -17,7 +17,7 @@ The 2026-09-02 follow-up specifically changes OAuth client compatibility, browse
 
 ## Evidence to read first
 
-1. [External audit and remediation disposition](audit-externe-2026-09-02.fr.md)
+1. [External audit and remediation disposition](external-audit-2026-09-02.md)
 2. [Primary security audit](security-audit-2026-08-31.md)
 3. [OAuth 2.1 security and operations](oauth-2.1.md)
 4. [Forgejo 16.0.3 compatibility report](../forgejo-16.0.3-compatibility.md)

@@ -6,7 +6,7 @@
 
 > The current branch disclosure scan, privacy review, final validation commands and independent-review checklist are maintained in the [third-party review handoff](third-party-review.md).
 
-> An independent Claude review on 2026-09-02 challenged two conclusions in this document and found additional audit/deployment weaknesses. Its original evidence, adverse counter-audit and remediation dispositions are preserved in the [external audit report](audit-externe-2026-09-02.fr.md). The follow-up rejects dot segments across repository/ref/file parameters, redacts both arguments and extracted targets before persistence, and revalidates TLS policy at every PAT-bearing boundary.
+> An independent Claude review on 2026-09-02 challenged two conclusions in this document and found additional audit/deployment weaknesses. Its original evidence, adverse counter-audit and remediation dispositions are preserved in the [external audit report](external-audit-2026-09-02.md). The follow-up rejects dot segments across repository/ref/file parameters, redacts both arguments and extracted targets before persistence, and revalidates TLS policy at every PAT-bearing boundary.
 
 The audit covered commit `d29d13bb21431fe307aca9fef7c0cd96749cd2b6` and the security patch prepared on branch `compat/forgejo-16.0.3`. It found no Critical issue, two High issues, three Medium issues, and three Low issues. All eight findings are fixed by the patch documented here.
 
