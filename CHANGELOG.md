@@ -16,6 +16,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 ### Added
 
+- Opt-in `filter` argument (`none` by default, `ci`) on `forgejo_get_action_job_log` and `forgejo_get_action_run_logs`: `ci` strips ANSI escape sequences, carriage-return rewrites and leading timestamps (ISO 8601, `[HH:MM:SS]`, `HH:MM:SS.mmm`), folds runs of identical lines into one suffixed `[×N]` and runs of blank lines into one, and reports what it removed in `filter_stats`. The filter runs on the already cut window only; `size`, `sha256`, `offset` and `returned_bytes` keep describing the raw log. Lossy: use `filter=none` when exact bytes matter.
 - Optional OAuth 2.1 authorization-code server with PKCE S256, exact redirect registration, RFC 8707 resource binding, RFC 9728 metadata, public-client DCR, allowlisted CIMD, local login and explicit consent.
 - Short-lived OAuth access tokens using the existing MCP permission engine, rotating refresh tokens with family-wide reuse detection/revocation, and one-time authorization codes.
 - PostgreSQL OAuth integration and full Docker E2E coverage for discovery, DCR, login, consent, MCP `2025-06-18`, permission intersection, refresh rotation and revocation on Forgejo 16.0.2 and 16.0.3.

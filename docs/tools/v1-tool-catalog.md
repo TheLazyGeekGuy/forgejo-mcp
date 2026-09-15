@@ -529,10 +529,15 @@ Run 與 artifact 清單皆有界；job 清單最多回傳 100 筆。不下載 ar
 | `from_end` | boolean | `true` | `true` 回傳 log 結尾（錯誤通常在此）；`false` 回傳開頭 |
 | `offset` | integer ≥ 0 | 0 | 略過的位元組數；`from_end=true` 時從結尾計算，否則從開頭計算 |
 | `grep` | string ≤ 256 | 無 | 不分大小寫的子字串過濾：只回傳符合的行，每行加上 1 起算的行號前綴；`max_bytes`、`from_end` 與 `offset` 套用於過濾後的文字。空字串等同未設定 |
+| `filter` | enum `none` \| `ci` | `none` | 明確啟用的雜訊過濾，只套用於已切好的視窗（在 `max_bytes`、`from_end`、`offset`、`grep` 之後），永不套用於原始 log |
 
 視窗盡可能切在行邊界：只要視窗內有換行，回傳的文字不會從行中間開始或在行中間結束。輸出欄位：`content`（UTF-8，無效位元組以 U+FFFD 取代）、`size`（整份 log 的位元組數）、`sha256`（整份 log）、`offset`（`content` 第一個位元組在來源文字中從開頭起算的位置）、`returned_bytes`、`truncated`（是否有未回傳的來源文字）。
 
-`forgejo_get_action_run_logs` 預設只回傳索引：每個檔案的 `name`、`size` 與 `sha256`。`include_content=true` 時另回傳每個檔案結尾的視窗（`content`、`offset`、`returned_bytes`、`truncated`），每檔最多 `max_bytes_per_file`（預設 65536，上限 1048576）。ZIP 最大接受 10 MiB，最多處理 100 個檔案且合計最多回傳 1 MiB 文字；ZIP 只在記憶體中讀取，永不解壓到磁碟。`forgejo_delete_action_run` 只適用於 Forgejo 允許刪除的已完成 run。Forgejo v16 沒有公開 PAT REST rerun endpoint，因此不提供 rerun 工具。
+`filter=ci` 以純 stdlib 正規表示式移除一組封閉的雜訊形狀，其餘內容原樣通過：(a) ANSI 逃逸序列（CSI `ESC[...`、游標控制、OSC `ESC]...BEL`）與進度列的歸位字元（每行只保留最後一個 `\r` 之後的片段；CRLF 行保留其內容）；(b) 行首的時間戳記，僅限三種嚴格形狀且後接一個空格或行尾：ISO 8601 `YYYY-MM-DDTHH:MM:SS(.frac)?(Z|±HH:MM)`、`[HH:MM:SS]`、`HH:MM:SS.mmm`（行中的時間、缺少毫秒的 `HH:MM:SS`、縮排後的時間戳記都不會被動到）；(c) 經 (a)(b) 處理後連續且完全相同的行合併為一行並加上 ` [×N]` 後綴；(d) 連續空行只保留一行。`grep` 的行號前綴位於行首，因此 (b) 與 (c) 對 `grep` 輸出不會生效，只有 (a) 與 (d) 仍會套用。
+
+`filter != none` 時輸出多一個 `filter_stats` 物件，宣告過濾器移除了什麼：`removed_ansi`（移除的逃逸序列數）、`removed_carriage_returns`、`removed_timestamps`、`collapsed_lines`（被合併掉的行數）、`removed_blank_lines`、`original_lines`、`filtered_lines`。沒有雜訊的 log 會逐位元組原樣回傳且所有計數為 0。`size`、`sha256`、`offset`、`returned_bytes` 與 `truncated` 永遠描述原始位元組，不受過濾影響。lossy: use `filter=none` when exact bytes matter; `sha256` always covers the raw log.
+
+`forgejo_get_action_run_logs` 預設只回傳索引：每個檔案的 `name`、`size` 與 `sha256`。`include_content=true` 時另回傳每個檔案結尾的視窗（`content`、`offset`、`returned_bytes`、`truncated`），每檔最多 `max_bytes_per_file`（預設 65536，上限 1048576）；`filter`（`none` | `ci`，預設 `none`）與上述相同，逐檔套用於每個已切好的視窗，並在每個檔案項目上附加 `filter_stats`；沒有 `include_content` 時 `filter` 無作用。ZIP 最大接受 10 MiB，最多處理 100 個檔案且合計最多回傳 1 MiB 文字；ZIP 只在記憶體中讀取，永不解壓到磁碟。`forgejo_delete_action_run` 只適用於 Forgejo 允許刪除的已完成 run。Forgejo v16 沒有公開 PAT REST rerun endpoint，因此不提供 rerun 工具。
 
 ## 6. Audit 規格
 
