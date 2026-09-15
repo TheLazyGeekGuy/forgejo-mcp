@@ -549,3 +549,201 @@ async def test_empty_combined_status_normalizes_to_pending() -> None:
         "statuses": [],
         "truncated": False,
     }
+
+
+LONG_BODY = " ".join(f"word{index:04d}" for index in range(600))  # > 4 KiB, word boundaries
+
+
+def _lean_client(
+    issues: list[dict[str, object]],
+    comments: list[dict[str, object]],
+    pulls: list[dict[str, object]] | None = None,
+) -> ForgejoClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        assert "fields" not in request.url.params
+        if path.endswith("/issues"):
+            return httpx.Response(200, json=issues)
+        if path.endswith("/issues/7/comments"):
+            return httpx.Response(200, json=comments)
+        if path.endswith("/pulls"):
+            return httpx.Response(200, json=pulls or [])
+        raise AssertionError(path)
+
+    return ForgejoClient(connect_timeout_seconds=2, transport=httpx.MockTransport(handler))
+
+
+COMMON = {
+    "base_url": "https://git.example.test",
+    "token": "pat",
+    "verify_tls": True,
+    "owner": "patrick",
+    "repo": "repo",
+}
+ISSUE_LIST_ARGS = {
+    "state": "open",
+    "labels": None,
+    "milestones": None,
+    "query": None,
+    "since": None,
+    "before": None,
+    "sort": "latest",
+    "page": 1,
+    "limit": 30,
+}
+PULL_LIST_ARGS = {
+    "state": "open",
+    "base": None,
+    "head": None,
+    "label_ids": None,
+    "milestone_id": None,
+    "sort": "recentupdate",
+    "page": 1,
+    "limit": 30,
+}
+
+
+async def test_list_tools_default_to_compact_items_with_bounded_bodies() -> None:
+    assert len(LONG_BODY) > 4096
+    long_issue = {**issue_payload(), "number": 1, "body": LONG_BODY}
+    short_issue = {**issue_payload(), "number": 2, "body": "Ready for review"}
+    empty_issue = {**issue_payload(), "number": 3, "body": None}
+    client = _lean_client(
+        [long_issue, short_issue, empty_issue],
+        [comment_payload()],
+        [{**pull_payload(), "body": LONG_BODY}],
+    )
+
+    page = await client.list_issues(**COMMON, **ISSUE_LIST_ARGS)
+    items = [item.model_dump(mode="json") for item in page.items]
+
+    long_item, short_item, empty_item = items
+    assert long_item["body_truncated"] is True
+    assert long_item["body"].endswith("…")
+    head = long_item["body"].removesuffix("…")
+    assert len(head) <= 200
+    assert LONG_BODY.startswith(head)
+    assert LONG_BODY[len(head)] == " ", "excerpt must end on a word boundary"
+    assert short_item == {**short_item, "body": "Ready for review", "body_truncated": False}
+    assert empty_item["body"] is None
+    assert empty_item["body_truncated"] is False
+    for item in items:
+        assert "html_url" not in item
+        assert "avatar_url" not in item["user"]
+        assert all("avatar_url" not in assignee for assignee in item["assignees"])
+        assert item["user"] == {"id": 42, "username": "patrick", "display_name": "Patrick"}
+        assert item["labels"] == [{"id": 1, "name": "feature", "color": "00ff00"}]
+        assert item["milestone"] == {"id": 2, "title": "v1"}
+        assert item["created_at"] == "2025-08-02T12:00:00Z"
+
+    comments = await client.list_issue_comments(**COMMON, number=7, since=None, before=None)
+    comment = comments.items[0].model_dump(mode="json")
+    assert comment["body"] == "Implemented"
+    assert comment["body_truncated"] is False
+    assert "html_url" not in comment
+    assert "avatar_url" not in comment["user"]
+
+    pulls = await client.list_pull_requests(**COMMON, **PULL_LIST_ARGS)
+    pull = pulls.items[0].model_dump(mode="json")
+    assert pull["body_truncated"] is True
+    assert pull["body"].endswith("…")
+    assert "html_url" not in pull
+    assert "avatar_url" not in pull["user"]
+    assert pull["head"] == {"ref": "feature", "sha": "bbb", "repository": "patrick/repo"}
+
+
+async def test_list_tools_full_fields_keep_the_complete_item_shape() -> None:
+    from forgejo_mcp.forgejo.models import parse_comment, parse_issue, parse_pull_request
+
+    long_issue = {**issue_payload(), "body": LONG_BODY}
+    long_comment = {**comment_payload(), "body": LONG_BODY}
+    long_pull = {**pull_payload(), "body": LONG_BODY}
+    client = _lean_client([long_issue], [long_comment])
+
+    issues = await client.list_issues(**COMMON, **ISSUE_LIST_ARGS, fields="full")
+    comments = await client.list_issue_comments(
+        **COMMON, number=7, since=None, before=None, fields="full"
+    )
+
+    assert issues.items[0].model_dump(mode="json") == {
+        **parse_issue(long_issue).model_dump(mode="json"),
+        "body_truncated": False,
+    }
+    assert comments.items[0].model_dump(mode="json") == {
+        **parse_comment(long_comment).model_dump(mode="json"),
+        "body_truncated": False,
+    }
+
+    client = _lean_client([], [], [long_pull])
+    pulls = await client.list_pull_requests(**COMMON, **PULL_LIST_ARGS, fields="full")
+
+    assert pulls.items[0].model_dump(mode="json") == {
+        **parse_pull_request(long_pull).model_dump(mode="json"),
+        "body_truncated": False,
+    }
+
+
+async def test_list_tools_reject_unknown_fields_selector() -> None:
+    client = _lean_client([issue_payload()], [comment_payload()])
+
+    with pytest.raises(ValidationFailed):
+        await client.list_issues(**COMMON, **ISSUE_LIST_ARGS, fields="verbose")
+    with pytest.raises(ValidationFailed):
+        await client.list_issue_comments(
+            **COMMON, number=7, since=None, before=None, fields="verbose"
+        )
+    with pytest.raises(ValidationFailed):
+        await client.list_pull_requests(**COMMON, **PULL_LIST_ARGS, fields="verbose")
+
+
+async def test_compact_issue_page_is_at_least_eighty_percent_smaller_than_full() -> None:
+    body = ("lorem ipsum dolor sit amet " * 200)[:4096]
+    assert len(body.encode()) == 4096
+    payloads = [{**issue_payload(), "number": index, "body": body} for index in range(1, 31)]
+    client = _lean_client(payloads, [])
+
+    async def page_bytes(fields: str) -> int:
+        page = await client.list_issues(**COMMON, **ISSUE_LIST_ARGS, fields=fields)
+        payload = {
+            "items": [item.model_dump(mode="json") for item in page.items],
+            "page": page.page,
+            "limit": page.limit,
+            "has_more": page.has_more,
+        }
+        return len(json.dumps(payload, ensure_ascii=False).encode())
+
+    compact = await page_bytes("compact")
+    full = await page_bytes("full")
+
+    print(f"compact={compact} full={full} saving={1 - compact / full:.1%}")
+    assert full > 30 * 4096
+    assert compact <= full * 0.2, f"compact={compact} full={full}"
+
+
+@pytest.mark.parametrize("fields", ["compact", "full"])
+async def test_list_tool_outputs_satisfy_their_output_schemas(fields: str) -> None:
+    import jsonschema
+
+    from forgejo_mcp.tools import get_tool
+
+    long_issue = {**issue_payload(), "body": LONG_BODY}
+    empty_issue = {**issue_payload(), "number": 8, "body": None, "milestone": None}
+    client = _lean_client([long_issue, empty_issue], [{**comment_payload(), "body": LONG_BODY}])
+
+    issues = await client.list_issues(**COMMON, **ISSUE_LIST_ARGS, fields=fields)
+    comments = await client.list_issue_comments(
+        **COMMON, number=7, since=None, before=None, fields=fields
+    )
+    pulls_client = _lean_client([], [], [{**pull_payload(), "body": LONG_BODY}])
+    pulls = await pulls_client.list_pull_requests(**COMMON, **PULL_LIST_ARGS, fields=fields)
+
+    def page(result: object) -> dict[str, object]:
+        items = [item.model_dump(mode="json") for item in result.items]  # type: ignore[attr-defined]
+        return {"items": items, "page": 1, "limit": 30, "has_more": False}
+
+    jsonschema.validate(page(issues), get_tool("forgejo_list_issues").output_schema)
+    jsonschema.validate(page(pulls), get_tool("forgejo_list_pull_requests").output_schema)
+    jsonschema.validate(
+        {"items": [item.model_dump(mode="json") for item in comments.items], "truncated": False},
+        get_tool("forgejo_list_issue_comments").output_schema,
+    )

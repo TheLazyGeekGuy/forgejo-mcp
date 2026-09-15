@@ -324,6 +324,7 @@ async def _execute_tool(
             page=cast(int, arguments.get("page", 1)),
             limit=cast(int, arguments.get("limit", 30)),
             order_by=cast(str, arguments.get("order_by", "recentupdate")),
+            fields=cast(str, arguments.get("fields", "compact")),
         )
         return _page_result(repository_page)
     if name == "forgejo_get_repository":
@@ -445,6 +446,7 @@ async def _execute_tool(
                 sort=cast(str, arguments.get("sort", "latest")),
                 page=cast(int, arguments.get("page", 1)),
                 limit=cast(int, arguments.get("limit", 30)),
+                fields=cast(str, arguments.get("fields", "compact")),
             )
         )
     if name == "forgejo_get_issue":
@@ -458,6 +460,7 @@ async def _execute_tool(
             number=cast(int, arguments["number"]),
             since=cast(str | None, arguments.get("since")),
             before=cast(str | None, arguments.get("before")),
+            fields=cast(str, arguments.get("fields", "compact")),
         )
         return {
             "items": [item.model_dump(mode="json") for item in comments_result.items],
@@ -476,6 +479,7 @@ async def _execute_tool(
                 sort=cast(str, arguments.get("sort", "recentupdate")),
                 page=cast(int, arguments.get("page", 1)),
                 limit=cast(int, arguments.get("limit", 30)),
+                fields=cast(str, arguments.get("fields", "compact")),
             )
         )
     if name == "forgejo_get_pull_request":

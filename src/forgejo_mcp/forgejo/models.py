@@ -1,9 +1,21 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    ValidationError,
+    field_validator,
+    model_serializer,
+)
 
 from forgejo_mcp.application.errors import ExternalServiceUnavailable
+from forgejo_mcp.forgejo.excerpt import excerpt
+
+ListFields = Literal["compact", "full"]
+LIST_FIELDS: frozenset[str] = frozenset({"compact", "full"})
 
 
 class RepositorySummary(BaseModel):
@@ -228,6 +240,107 @@ class FileContent(BaseModel):
     encoding: str
     content: str
     html_url: str | None
+
+
+class _ListItem(BaseModel):
+    """Base for list tool items: link fields left unset (compact form) are omitted."""
+
+    model_config = ConfigDict(strict=True)
+    _compact_omits: ClassVar[frozenset[str]] = frozenset()
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_link_fields(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        for name in self._compact_omits - self.model_fields_set:
+            data.pop(name, None)
+        return data
+
+
+class UserListItem(_ListItem):
+    _compact_omits: ClassVar[frozenset[str]] = frozenset({"avatar_url"})
+
+    id: int
+    username: str
+    display_name: str | None
+    avatar_url: str | None = None
+
+
+class RepositoryListItem(_ListItem):
+    _compact_omits: ClassVar[frozenset[str]] = frozenset({"html_url"})
+
+    id: int
+    owner: str
+    name: str
+    full_name: str
+    description: str
+    description_truncated: bool
+    private: bool
+    fork: bool
+    default_branch: str
+    archived: bool
+    html_url: str | None = None
+    updated_at: datetime | None
+    stars_count: int | None = None
+    forks_count: int | None = None
+    open_issues_count: int | None = None
+    permissions: dict[str, bool] | None = None
+
+
+class IssueListItem(_ListItem):
+    _compact_omits: ClassVar[frozenset[str]] = frozenset({"html_url"})
+
+    number: int
+    title: str
+    body: str | None
+    body_truncated: bool
+    state: str
+    html_url: str | None = None
+    user: UserListItem
+    assignees: list[UserListItem]
+    labels: list[LabelSummary]
+    milestone: MilestoneSummary | None
+    comments_count: int
+    created_at: datetime
+    updated_at: datetime
+    closed_at: datetime | None
+
+
+class CommentListItem(_ListItem):
+    _compact_omits: ClassVar[frozenset[str]] = frozenset({"html_url"})
+
+    id: int
+    body: str
+    body_truncated: bool
+    html_url: str | None = None
+    user: UserListItem
+    created_at: datetime
+    updated_at: datetime
+
+
+class PullRequestListItem(_ListItem):
+    _compact_omits: ClassVar[frozenset[str]] = frozenset({"html_url"})
+
+    number: int
+    title: str
+    body: str | None
+    body_truncated: bool
+    state: str
+    draft: bool
+    mergeable: bool | None
+    merged: bool
+    html_url: str | None = None
+    user: UserListItem
+    base: PullRefSummary
+    head: PullRefSummary
+    labels: list[LabelSummary]
+    created_at: datetime
+    updated_at: datetime
+    closed_at: datetime | None
+    merged_at: datetime | None
+    commits_count: int | None = None
+    additions: int | None = None
+    deletions: int | None = None
+    changed_files: int | None = None
 
 
 class _UserPayload(BaseModel):
@@ -850,3 +963,100 @@ def parse_pull_requests(payload: Any) -> list[PullRequestSummary]:
         raise ExternalServiceUnavailable(
             "Forgejo returned an invalid pull request list response"
         ) from error
+
+
+def _user_list_item(user: UserSummary, fields: str) -> UserListItem:
+    links = {"avatar_url": user.avatar_url} if fields == "full" else {}
+    return UserListItem(id=user.id, username=user.username, display_name=user.display_name, **links)
+
+
+def _bounded_text(text: str | None, fields: str) -> tuple[str | None, bool]:
+    if fields == "full":
+        return text, False
+    return excerpt(text)
+
+
+def repository_list_item(repository: RepositorySummary, *, fields: str) -> RepositoryListItem:
+    description, truncated = _bounded_text(repository.description, fields)
+    links = {"html_url": repository.html_url} if fields == "full" else {}
+    return RepositoryListItem(
+        id=repository.id,
+        owner=repository.owner,
+        name=repository.name,
+        full_name=repository.full_name,
+        description=description or "",
+        description_truncated=truncated,
+        private=repository.private,
+        fork=repository.fork,
+        default_branch=repository.default_branch,
+        archived=repository.archived,
+        updated_at=repository.updated_at,
+        stars_count=repository.stars_count,
+        forks_count=repository.forks_count,
+        open_issues_count=repository.open_issues_count,
+        permissions=repository.permissions,
+        **links,
+    )
+
+
+def issue_list_item(issue: IssueSummary, *, fields: str) -> IssueListItem:
+    body, truncated = _bounded_text(issue.body, fields)
+    links = {"html_url": issue.html_url} if fields == "full" else {}
+    return IssueListItem(
+        number=issue.number,
+        title=issue.title,
+        body=body,
+        body_truncated=truncated,
+        state=issue.state,
+        user=_user_list_item(issue.user, fields),
+        assignees=[_user_list_item(item, fields) for item in issue.assignees],
+        labels=issue.labels,
+        milestone=issue.milestone,
+        comments_count=issue.comments_count,
+        created_at=issue.created_at,
+        updated_at=issue.updated_at,
+        closed_at=issue.closed_at,
+        **links,
+    )
+
+
+def comment_list_item(comment: CommentSummary, *, fields: str) -> CommentListItem:
+    body, truncated = _bounded_text(comment.body, fields)
+    links = {"html_url": comment.html_url} if fields == "full" else {}
+    return CommentListItem(
+        id=comment.id,
+        body=body or "",
+        body_truncated=truncated,
+        user=_user_list_item(comment.user, fields),
+        created_at=comment.created_at,
+        updated_at=comment.updated_at,
+        **links,
+    )
+
+
+def pull_request_list_item(pull: PullRequestSummary, *, fields: str) -> PullRequestListItem:
+    body, truncated = _bounded_text(pull.body, fields)
+    links = {"html_url": pull.html_url} if fields == "full" else {}
+    return PullRequestListItem(
+        number=pull.number,
+        title=pull.title,
+        body=body,
+        body_truncated=truncated,
+        state=pull.state,
+        draft=pull.draft,
+        mergeable=pull.mergeable,
+        merged=pull.merged,
+        user=_user_list_item(pull.user, fields),
+        base=pull.base,
+        head=pull.head,
+        labels=pull.labels,
+        created_at=pull.created_at,
+        updated_at=pull.updated_at,
+        closed_at=pull.closed_at,
+        merged_at=pull.merged_at,
+        commits_count=pull.commits_count,
+        additions=pull.additions,
+        deletions=pull.deletions,
+        changed_files=pull.changed_files,
+        **links,
+    )

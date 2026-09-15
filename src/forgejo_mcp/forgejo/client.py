@@ -18,18 +18,25 @@ import httpx
 
 from forgejo_mcp.application.errors import ExternalServiceUnavailable, NotFound, ValidationFailed
 from forgejo_mcp.forgejo.models import (
+    LIST_FIELDS,
     BranchSummary,
+    CommentListItem,
     CommentSummary,
     CommitDetail,
     CommitSummary,
     CompareSummary,
     FileContent,
     GitTreeSummary,
+    IssueListItem,
     IssueSummary,
+    PullRequestListItem,
     PullRequestSummary,
     RepositoryLabelSummary,
+    RepositoryListItem,
     RepositoryMilestoneSummary,
     RepositorySummary,
+    comment_list_item,
+    issue_list_item,
     parse_branches,
     parse_comment,
     parse_comments,
@@ -45,6 +52,8 @@ from forgejo_mcp.forgejo.models import (
     parse_repository,
     parse_repository_labels,
     parse_repository_milestones,
+    pull_request_list_item,
+    repository_list_item,
 )
 from forgejo_mcp.observability.metrics import (
     FORGEJO_DURATION,
@@ -193,8 +202,10 @@ class ForgejoClient:
         page: int,
         limit: int,
         order_by: str,
-    ) -> Page[RepositorySummary]:
+        fields: str = "compact",
+    ) -> Page[RepositoryListItem]:
         _validate_page(page, limit)
+        _list_fields(fields)
         if order_by not in _REPOSITORY_ORDER_VALUES:
             raise ValidationFailed("repository order is invalid")
         payload = await self._get_json(
@@ -204,7 +215,8 @@ class ForgejoClient:
             params={"page": page, "limit": limit, "order_by": order_by},
             resource="repository list",
         )
-        items = parse_repositories(payload)
+        repositories = parse_repositories(payload)
+        items = [repository_list_item(item, fields=fields) for item in repositories]
         return Page(items=items, page=page, limit=limit, has_more=len(items) == limit)
 
     async def get_repository(
@@ -659,8 +671,10 @@ class ForgejoClient:
         sort: str,
         page: int,
         limit: int,
-    ) -> Page[IssueSummary]:
+        fields: str = "compact",
+    ) -> Page[IssueListItem]:
         _validate_page(page, limit)
+        _list_fields(fields)
         if state not in {"open", "closed", "all"}:
             raise ValidationFailed("issue state is invalid")
         if sort not in {
@@ -697,7 +711,8 @@ class ForgejoClient:
             params=params,
             resource="issue list",
         )
-        items = parse_issues(payload)
+        issues = parse_issues(payload)
+        items = [issue_list_item(item, fields=fields) for item in issues]
         return Page(items=items, page=page, limit=limit, has_more=len(items) == limit)
 
     async def get_issue(
@@ -730,7 +745,9 @@ class ForgejoClient:
         number: int,
         since: str | None,
         before: str | None,
-    ) -> BoundedList[CommentSummary]:
+        fields: str = "compact",
+    ) -> BoundedList[CommentListItem]:
+        _list_fields(fields)
         params: dict[str, str | int | float | bool | None] = {}
         if since is not None:
             params["since"] = _timestamp(since, "since")
@@ -745,8 +762,9 @@ class ForgejoClient:
             params=params,
             resource="issue comments",
         )
-        items = parse_comments(payload)
-        return BoundedList(items=items[:100], truncated=len(items) > 100)
+        comments = parse_comments(payload)
+        items = [comment_list_item(item, fields=fields) for item in comments[:100]]
+        return BoundedList(items=items, truncated=len(comments) > 100)
 
     async def list_pull_requests(
         self,
@@ -764,8 +782,10 @@ class ForgejoClient:
         sort: str,
         page: int,
         limit: int,
-    ) -> Page[PullRequestSummary]:
+        fields: str = "compact",
+    ) -> Page[PullRequestListItem]:
         _validate_page(page, limit)
+        _list_fields(fields)
         if state not in {"open", "closed", "all"}:
             raise ValidationFailed("pull request state is invalid")
         if sort not in {
@@ -799,7 +819,8 @@ class ForgejoClient:
             params=params,
             resource="pull request list",
         )
-        items = parse_pull_requests(payload)
+        pulls = parse_pull_requests(payload)
+        items = [pull_request_list_item(item, fields=fields) for item in pulls]
         return Page(items=items, page=page, limit=limit, has_more=len(items) == limit)
 
     async def get_pull_request(
@@ -2272,6 +2293,12 @@ def _retry_after_seconds(value: str | None) -> float:
         if retry_at.tzinfo is None:
             retry_at = retry_at.replace(tzinfo=UTC)
         return max(0.0, (retry_at - datetime.now(UTC)).total_seconds())
+
+
+def _list_fields(value: str) -> str:
+    if value not in LIST_FIELDS:
+        raise ValidationFailed("list fields selector is invalid")
+    return value
 
 
 def _validate_page(page: int, limit: int) -> None:

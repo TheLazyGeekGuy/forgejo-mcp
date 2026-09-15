@@ -11,15 +11,19 @@ from forgejo_mcp.db.repositories import ForgejoInstanceRepository
 from forgejo_mcp.forgejo.client import BoundedList, DiffContent, ForgejoUser, Page
 from forgejo_mcp.forgejo.models import (
     BranchSummary,
+    CommentListItem,
     CommentSummary,
     CommitDetail,
     CommitSummary,
     CompareSummary,
     FileContent,
     GitTreeSummary,
+    IssueListItem,
     IssueSummary,
+    PullRequestListItem,
     PullRequestSummary,
     RepositoryLabelSummary,
+    RepositoryListItem,
     RepositoryMilestoneSummary,
     RepositorySummary,
 )
@@ -46,7 +50,8 @@ class ForgejoToolService:
         page: int,
         limit: int,
         order_by: str,
-    ) -> Page[RepositorySummary]:
+        fields: str = "compact",
+    ) -> Page[RepositoryListItem]:
         instance, token = await self._connection(user_id)
         return await self.credentials.client.list_repositories(
             base_url=instance.base_url,
@@ -55,6 +60,7 @@ class ForgejoToolService:
             page=page,
             limit=limit,
             order_by=order_by,
+            fields=fields,
         )
 
     async def get_repository(
@@ -196,7 +202,7 @@ class ForgejoToolService:
             await self._call(user_id, "list_milestones", **kwargs),
         )
 
-    async def list_issues(self, user_id: uuid.UUID, **kwargs: Any) -> Page[IssueSummary]:
+    async def list_issues(self, user_id: uuid.UUID, **kwargs: Any) -> Page[IssueListItem]:
         instance, token = await self._connection(user_id)
         return await self.credentials.client.list_issues(
             base_url=instance.base_url, token=token, verify_tls=instance.verify_tls, **kwargs
@@ -210,7 +216,7 @@ class ForgejoToolService:
 
     async def list_issue_comments(
         self, user_id: uuid.UUID, **kwargs: Any
-    ) -> BoundedList[CommentSummary]:
+    ) -> BoundedList[CommentListItem]:
         instance, token = await self._connection(user_id)
         return await self.credentials.client.list_issue_comments(
             base_url=instance.base_url, token=token, verify_tls=instance.verify_tls, **kwargs
@@ -218,7 +224,7 @@ class ForgejoToolService:
 
     async def list_pull_requests(
         self, user_id: uuid.UUID, **kwargs: Any
-    ) -> Page[PullRequestSummary]:
+    ) -> Page[PullRequestListItem]:
         instance, token = await self._connection(user_id)
         return await self.credentials.client.list_pull_requests(
             base_url=instance.base_url, token=token, verify_tls=instance.verify_tls, **kwargs
