@@ -75,6 +75,28 @@ def _repository_schema() -> dict[str, Any]:
     )
 
 
+def _list_item_schema(
+    schema: dict[str, Any],
+    *,
+    truncation_flag: str,
+    after: str,
+    optional: tuple[str, ...] = ("html_url",),
+    user_schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Derive a list item schema: a required truncation flag placed after the bounded
+    text field, link fields optional (omitted in the compact form) and lean users."""
+    properties: dict[str, Any] = {}
+    for name, value in schema["properties"].items():
+        if user_schema is not None and name in {"user", "assignees"}:
+            value = user_schema if name == "user" else {"type": "array", "items": user_schema}
+        properties[name] = value
+        if name == after:
+            properties[truncation_flag] = {"type": "boolean"}
+    required = [name for name in schema["required"] if name not in optional]
+    required.insert(required.index(after) + 1, truncation_flag)
+    return _object_schema(properties, required)
+
+
 def _page_schema(item_schema: dict[str, Any]) -> dict[str, Any]:
     return _object_schema(
         {
@@ -101,6 +123,14 @@ _REPO = {
 }
 _PAGE = {"type": "integer", "minimum": 1, "maximum": 100000, "default": 1}
 _LIMIT = {"type": "integer", "minimum": 1, "maximum": 100, "default": 30}
+_FIELDS = {"type": "string", "enum": ["compact", "full"], "default": "compact"}
+_FIELDS_DESCRIPTION = (
+    " `fields=compact` (default) bounds long text to a 200-character excerpt and omits"
+    " `html_url`/`avatar_url`; `fields=full` returns complete items."
+)
+_REPOSITORY_LIST_SCHEMA = _list_item_schema(
+    _repository_schema(), truncation_flag="description_truncated", after="description"
+)
 _BRANCH_SCHEMA = _object_schema(
     {
         "name": {"type": "string"},
@@ -181,6 +211,9 @@ _USER_SCHEMA = _object_schema(
         "avatar_url": {"type": ["string", "null"]},
     },
     ["id", "username", "display_name", "avatar_url"],
+)
+_USER_LIST_SCHEMA = _object_schema(
+    dict(_USER_SCHEMA["properties"]), ["id", "username", "display_name"]
 )
 _LABEL_SCHEMA = _object_schema(
     {"id": {"type": "integer"}, "name": {"type": "string"}, "color": {"type": "string"}},
@@ -283,6 +316,12 @@ _COMMENT_SCHEMA = _object_schema(
     },
     ["id", "body", "html_url", "user", "created_at", "updated_at"],
 )
+_ISSUE_LIST_SCHEMA = _list_item_schema(
+    _ISSUE_SCHEMA, truncation_flag="body_truncated", after="body", user_schema=_USER_LIST_SCHEMA
+)
+_COMMENT_LIST_SCHEMA = _list_item_schema(
+    _COMMENT_SCHEMA, truncation_flag="body_truncated", after="body", user_schema=_USER_LIST_SCHEMA
+)
 _PULL_REF_SCHEMA = _object_schema(
     {"ref": {"type": "string"}, "sha": {"type": "string"}, "repository": {"type": "string"}},
     ["ref", "sha", "repository"],
@@ -332,6 +371,9 @@ _PR_SCHEMA = _object_schema(
         "deletions",
         "changed_files",
     ],
+)
+_PR_LIST_SCHEMA = _list_item_schema(
+    _PR_SCHEMA, truncation_flag="body_truncated", after="body", user_schema=_USER_LIST_SCHEMA
 )
 
 _CONTENT_ENTRY_SCHEMA = _object_schema(
@@ -596,12 +638,14 @@ _TOOL_SPECS = (
     ToolSpec(
         name="forgejo_list_repositories",
         title="List repositories",
-        description="List repositories visible to the token owner's Forgejo PAT.",
+        description="List repositories visible to the token owner's Forgejo PAT."
+        + _FIELDS_DESCRIPTION,
         risk="read",
         input_schema=_object_schema(
             {
                 "page": _PAGE,
                 "limit": _LIMIT,
+                "fields": _FIELDS,
                 "order_by": {
                     "type": "string",
                     "enum": [
@@ -625,7 +669,7 @@ _TOOL_SPECS = (
             },
             [],
         ),
-        output_schema=_page_schema(_repository_schema()),
+        output_schema=_page_schema(_REPOSITORY_LIST_SCHEMA),
     ),
     ToolSpec(
         name="forgejo_get_repository",
@@ -869,7 +913,7 @@ _TOOL_SPECS = (
     ToolSpec(
         name="forgejo_list_issues",
         title="List issues",
-        description="List repository issues.",
+        description="List repository issues." + _FIELDS_DESCRIPTION,
         risk="read",
         input_schema=_object_schema(
             {
@@ -904,10 +948,11 @@ _TOOL_SPECS = (
                 },
                 "page": _PAGE,
                 "limit": _LIMIT,
+                "fields": _FIELDS,
             },
             ["owner", "repo"],
         ),
-        output_schema=_page_schema(_ISSUE_SCHEMA),
+        output_schema=_page_schema(_ISSUE_LIST_SCHEMA),
     ),
     ToolSpec(
         name="forgejo_get_issue",
@@ -922,7 +967,7 @@ _TOOL_SPECS = (
     ToolSpec(
         name="forgejo_list_issue_comments",
         title="List issue comments",
-        description="Return bounded issue or pull request comments.",
+        description="Return bounded issue or pull request comments." + _FIELDS_DESCRIPTION,
         risk="read-sensitive",
         input_schema=_object_schema(
             {
@@ -931,12 +976,13 @@ _TOOL_SPECS = (
                 "number": _NUMBER,
                 "since": _TIMESTAMP,
                 "before": _TIMESTAMP,
+                "fields": _FIELDS,
             },
             ["owner", "repo", "number"],
         ),
         output_schema=_object_schema(
             {
-                "items": {"type": "array", "items": _COMMENT_SCHEMA, "maxItems": 100},
+                "items": {"type": "array", "items": _COMMENT_LIST_SCHEMA, "maxItems": 100},
                 "truncated": {"type": "boolean"},
             },
             ["items", "truncated"],
@@ -945,7 +991,7 @@ _TOOL_SPECS = (
     ToolSpec(
         name="forgejo_list_pull_requests",
         title="List pull requests",
-        description="List repository pull requests.",
+        description="List repository pull requests." + _FIELDS_DESCRIPTION,
         risk="read",
         input_schema=_object_schema(
             {
@@ -971,10 +1017,11 @@ _TOOL_SPECS = (
                 },
                 "page": _PAGE,
                 "limit": _LIMIT,
+                "fields": _FIELDS,
             },
             ["owner", "repo"],
         ),
-        output_schema=_page_schema(_PR_SCHEMA),
+        output_schema=_page_schema(_PR_LIST_SCHEMA),
     ),
     ToolSpec(
         name="forgejo_get_pull_request",

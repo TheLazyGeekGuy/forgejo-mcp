@@ -40,6 +40,7 @@ v1 提供 30 個唯讀工具及 20 個寫入工具，共 50 個。平台不提�
 | `path` | 1–1024 字元、相對 repository root、不得以 `/` 開頭、不得包含 NUL 或 `..` segment |
 | `page` | default `1`，範圍 1–100000 |
 | `limit` | default `30`，範圍 1–100，server 不接受無界列表 |
+| `fields` | 列表工具專用，`compact | full`，default `compact`；見 2.7 |
 | 搜尋字串 | 最多 256 字元 |
 | title | 1–255 字元，trim 後不可為空 |
 | issue/PR body | 最多 65,536 字元 |
@@ -105,6 +106,20 @@ Tool error 使用穩定類型，訊息不得包含 PAT、MCP Token、Authorizati
 | `forgejo_unavailable` | Network error 或 Forgejo `5xx` |
 
 唯讀 GET 可針對連線中斷及明確暫時性 `5xx` 做有限 jitter retry；所有寫入工具不得自動 retry。
+
+### 2.7 列表精簡輸出（`fields`）
+
+`forgejo_list_repositories`、`forgejo_list_issues`、`forgejo_list_issue_comments` 與 `forgejo_list_pull_requests` 回傳的是 **list item**，不是完整的 `*Summary`；單筆 `get_*` 工具不受影響。
+
+| `fields` | 行為 |
+| --- | --- |
+| `compact`（default） | `body`（repository 為 `description`）縮短為最多 200 字元的摘錄，盡量在字或行邊界切斷，被截斷時以 `…` 結尾並回傳 `body_truncated: true`（repository 為 `description_truncated`）；item 與其 `user`/`assignees` 省略 `html_url` 與 `avatar_url` |
+| `full` | 完整 `body`/`description`、所有欄位（含 `html_url`、`avatar_url`），`body_truncated`/`description_truncated` 固定為 `false` |
+
+- `body: null` 保持 `null`，`body_truncated: false`。
+- 截斷旗標在兩種形式下都是必填；`html_url`/`avatar_url` 在 schema 中為 optional。
+- 完整內容請改用 `forgejo_get_issue`、`forgejo_get_pull_request` 或 `forgejo_get_repository`。
+- 量測：30 筆 4 KiB body 的 issue 頁面，`compact` 約為 `full` 的 14%（19,844 vs 141,704 bytes）。
 
 ## 3. Normalized resource shapes
 
@@ -208,6 +223,15 @@ closed_at: datetime | null
 merged_at: datetime | null
 ```
 
+### List items（`fields=compact | full`）
+
+```text
+RepositoryListItem  = RepositorySummary + description_truncated: boolean；compact 時省略 html_url
+IssueListItem       = IssueSummary + body_truncated: boolean；compact 時省略 html_url 與 user/assignees 的 avatar_url
+CommentListItem     = CommentSummary + body_truncated: boolean；compact 時省略 html_url 與 user.avatar_url
+PullRequestListItem = PullRequestSummary + body_truncated: boolean；compact 時省略 html_url 與 user.avatar_url
+```
+
 ## 4. 唯讀工具規格
 
 ### 4.1 `forgejo_get_current_user`
@@ -224,9 +248,9 @@ merged_at: datetime | null
 - **Risk:** `read`
 - **Forgejo:** `GET /api/v1/user/repos`
 - **預期最小 scope:** `read:user`；private repository 能見度仍由 PAT 決定。
-- **Input:** `page`、`limit`、`order_by`。
+- **Input:** `page`、`limit`、`order_by`、optional `fields`（`compact | full`, default `compact`）。
 - **`order_by`:** `name | id | newest | oldest | recentupdate | leastupdate | alphabetically | reversealphabetically | size | reversesize | moststars | feweststars | mostforks | fewestforks`，default `recentupdate`。
-- **Output:** paginated `RepositorySummary`。
+- **Output:** paginated `RepositoryListItem`（見 2.7）。
 
 ### 4.3 `forgejo_get_repository`
 
@@ -346,9 +370,9 @@ Forgejo v16 compare response 不提供可靠的 ahead/behind 或 resolved base/h
 - **Risk:** `read`
 - **Forgejo:** `GET /api/v1/repos/{owner}/{repo}/issues`，固定上游 `type=issues`。
 - **預期最小 scope:** `read:issue`
-- **Input:** `owner`、`repo`、`state` (`open | closed | all`, default `open`)、optional `labels: string[]`、optional `milestones: string[]`、optional `query`、optional `since`、optional `before`、`sort`、`page`、`limit`。
+- **Input:** `owner`、`repo`、`state` (`open | closed | all`, default `open`)、optional `labels: string[]`、optional `milestones: string[]`、optional `query`、optional `since`、optional `before`、`sort`、`page`、`limit`、optional `fields`（`compact | full`, default `compact`）。
 - **`sort`:** `relevance | latest | oldest | recentupdate | leastupdate | mostcomment | leastcomment`，default `latest`。
-- **Output:** paginated `IssueSummary`。
+- **Output:** paginated `IssueListItem`（見 2.7）。
 
 ### 4.10 `forgejo_get_issue`
 
@@ -364,8 +388,8 @@ Forgejo v16 compare response 不提供可靠的 ahead/behind 或 resolved base/h
 - **Risk:** `read-sensitive`
 - **Forgejo:** `GET /api/v1/repos/{owner}/{repo}/issues/{index}/comments`
 - **預期最小 scope:** `read:issue`
-- **Input:** `owner`、`repo`、`number`、optional `since`、optional `before`。
-- **Output:** `{ items: CommentSummary[], truncated: boolean }`，最多 100 筆。
+- **Input:** `owner`、`repo`、`number`、optional `since`、optional `before`、optional `fields`（`compact | full`, default `compact`）。
+- **Output:** `{ items: CommentListItem[], truncated: boolean }`，最多 100 筆（見 2.7）。
 - 同一 endpoint 同時適用 issue 與 PR conversation comments。
 
 ### 4.12 `forgejo_list_pull_requests`
@@ -373,9 +397,9 @@ Forgejo v16 compare response 不提供可靠的 ahead/behind 或 resolved base/h
 - **Risk:** `read`
 - **Forgejo:** `GET /api/v1/repos/{owner}/{repo}/pulls`
 - **預期最小 scope:** `read:repository`
-- **Input:** `owner`、`repo`、`state` (`open | closed | all`, default `open`)、optional `base`、`head`、`label_ids: integer[]`、optional `milestone_id`、`sort`、`page`、`limit`。
+- **Input:** `owner`、`repo`、`state` (`open | closed | all`, default `open`)、optional `base`、`head`、`label_ids: integer[]`、optional `milestone_id`、`sort`、`page`、`limit`、optional `fields`（`compact | full`, default `compact`）。
 - **`sort`:** `oldest | recentupdate | recentclose | leastupdate | mostcomment | leastcomment | priority`，default `recentupdate`。
-- **Output:** paginated `PullRequestSummary`。
+- **Output:** paginated `PullRequestListItem`（見 2.7）。
 
 ### 4.13 `forgejo_get_pull_request`
 

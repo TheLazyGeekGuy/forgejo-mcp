@@ -230,3 +230,52 @@ def test_batch_tool_authorization_loads_one_permission_snapshot() -> None:
         permissions.grant_names.assert_awaited_once_with(token_id)
 
     asyncio.run(exercise())
+
+
+LIST_TOOLS_WITH_FIELDS = (
+    "forgejo_list_repositories",
+    "forgejo_list_issues",
+    "forgejo_list_issue_comments",
+    "forgejo_list_pull_requests",
+)
+_LIST_TOOL_BASE_ARGUMENTS: dict[str, dict[str, object]] = {
+    "forgejo_list_repositories": {},
+    "forgejo_list_issues": {"owner": "owner", "repo": "repo"},
+    "forgejo_list_issue_comments": {"owner": "owner", "repo": "repo", "number": 1},
+    "forgejo_list_pull_requests": {"owner": "owner", "repo": "repo"},
+}
+
+
+@pytest.mark.parametrize("tool_name", LIST_TOOLS_WITH_FIELDS)
+def test_list_tool_fields_selector_is_a_closed_enum_defaulting_to_compact(tool_name: str) -> None:
+    spec = get_tool(tool_name)
+    fields = spec.input_schema["properties"]["fields"]
+    validator = jsonschema.Draft202012Validator(spec.input_schema)
+    base = _LIST_TOOL_BASE_ARGUMENTS[tool_name]
+
+    assert fields == {"type": "string", "enum": ["compact", "full"], "default": "compact"}
+    assert "fields" not in spec.input_schema["required"]
+    assert not list(validator.iter_errors(base)), "fields must be optional"
+    assert not list(validator.iter_errors({**base, "fields": "compact"}))
+    assert not list(validator.iter_errors({**base, "fields": "full"}))
+    assert any(
+        list(error.path) == ["fields"]
+        for error in validator.iter_errors({**base, "fields": "verbose"})
+    )
+
+
+@pytest.mark.parametrize("tool_name", LIST_TOOLS_WITH_FIELDS)
+def test_list_tool_output_schema_requires_truncation_flag_and_relaxes_links(
+    tool_name: str,
+) -> None:
+    item = get_tool(tool_name).output_schema["properties"]["items"]["items"]
+    flag = "description_truncated" if tool_name == "forgejo_list_repositories" else "body_truncated"
+
+    assert item["properties"][flag] == {"type": "boolean"}
+    assert flag in item["required"]
+    assert "html_url" in item["properties"]
+    assert "html_url" not in item["required"]
+    if "user" in item["properties"]:
+        user = item["properties"]["user"]
+        assert "avatar_url" in user["properties"]
+        assert "avatar_url" not in user["required"]
