@@ -22,6 +22,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 
 - Compact single-pass JSON serialization of MCP tool results (no indentation, UTF-8 preserved) in place of the SDK's indented text block.
 - `FMCP_MCP_STRUCTURED_OUTPUT` setting (default `true`) that, when `false`, omits `outputSchema` from `tools/list` and `structuredContent` from `tools/call` together to reduce token usage.
+- Opt-in `filter` argument (`none` by default, `ci`) on `forgejo_get_action_job_log` and `forgejo_get_action_run_logs`: `ci` strips ANSI escape sequences, carriage-return rewrites and leading timestamps (ISO 8601, `[HH:MM:SS]`, `HH:MM:SS.mmm`), folds runs of identical lines into one suffixed `[×N]` and runs of blank lines into one, and reports what it removed in `filter_stats`. The filter runs on the already cut window only; `size`, `sha256`, `offset` and `returned_bytes` keep describing the raw log. Lossy: use `filter=none` when exact bytes matter.
 - Optional OAuth 2.1 authorization-code server with PKCE S256, exact redirect registration, RFC 8707 resource binding, RFC 9728 metadata, public-client DCR, allowlisted CIMD, local login and explicit consent.
 - Short-lived OAuth access tokens using the existing MCP permission engine, rotating refresh tokens with family-wide reuse detection/revocation, and one-time authorization codes.
 - PostgreSQL OAuth integration and full Docker E2E coverage for discovery, DCR, login, consent, MCP `2025-06-18`, permission intersection, refresh rotation and revocation on Forgejo 16.0.2 and 16.0.3.
@@ -65,6 +66,8 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 ### Changed
 
 - Window `forgejo_get_pull_request_diff` output: optional `paths` (1–50 exact file paths, renames match either name) keep only the matching `diff --git` sections, and `max_bytes` (default 64 KiB) plus `offset` page through the filtered diff on line boundaries. The result now reports `total_size`, `offset`, `returned_bytes`, `truncated`, `files_included` and `files_missing`; `sha256` still covers the complete diff and the 2 MiB input bound is unchanged.
+- `forgejo_get_action_job_log` now returns a bounded window instead of the head of the log: the default window is the last 64 KiB, cut on line boundaries, with `max_bytes` (up to 1 MiB), `from_end`, `offset` and a case-insensitive `grep` filter that prefixes matching lines with their number; the result also reports `offset` and `returned_bytes`.
+- `forgejo_get_action_run_logs` now returns only an index (`name`, `size`, `sha256`) of the archived files by default; `include_content=true` restores file content, bounded per file by `max_bytes_per_file` (default 64 KiB, the end of each file) in addition to the existing 1 MiB total budget.
 - Batch MCP tool-discovery authorization against one permission snapshot, eliminating repeated registry writes and per-tool SQL reloads without changing deny-by-default decisions.
 - Treat an empty optional repository-content path as the repository root, avoiding repeated validation failures from MCP clients that serialize omitted strings as empty values.
 - Defined Forgejo 16.0.3 as the minimum supported release; the locked 16.0.2 contract and E2E run remain comparison evidence only and do not extend the published support range.

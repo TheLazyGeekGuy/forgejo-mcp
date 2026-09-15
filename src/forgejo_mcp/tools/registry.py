@@ -516,6 +516,84 @@ _ACTION_ARTIFACT_SCHEMA = _object_schema(
         "updated_at",
     ],
 )
+_ACTION_LOG_WINDOW_BYTES = {
+    "type": "integer",
+    "minimum": 1,
+    "maximum": 1024 * 1024,
+    "default": 64 * 1024,
+    "description": "Maximum number of log bytes to return; the window is cut on line boundaries.",
+}
+_ACTION_LOG_FROM_END = {
+    "type": "boolean",
+    "default": True,
+    "description": "Return the end of the log (where failures usually are) instead of its start.",
+}
+_ACTION_LOG_OFFSET = {
+    "type": "integer",
+    "minimum": 0,
+    "default": 0,
+    "description": (
+        "Byte offset to skip, counted from the end when from_end is true and from the start "
+        "otherwise; a window never starts mid-line when a newline is available."
+    ),
+}
+_ACTION_LOG_GREP = {
+    "type": "string",
+    "maxLength": 256,
+    "description": (
+        "Case-insensitive substring filter: only matching lines are returned, each prefixed "
+        "with its 1-based line number; max_bytes, from_end and offset apply to the filtered "
+        "text. An empty string disables the filter."
+    ),
+}
+_ACTION_LOG_INCLUDE_CONTENT = {
+    "type": "boolean",
+    "default": False,
+    "description": "Include a bounded window of each file; by default only the index is returned.",
+}
+_ACTION_LOG_PER_FILE_BYTES = {
+    "type": "integer",
+    "minimum": 1,
+    "maximum": 1024 * 1024,
+    "default": 64 * 1024,
+    "description": "Maximum bytes returned per file (its end) when include_content is true.",
+}
+_ACTION_LOG_FILTER = {
+    "type": "string",
+    "enum": ["none", "ci"],
+    "default": "none",
+    "description": (
+        "Opt-in noise filter applied to the returned window only, after max_bytes/from_end/"
+        "offset/grep: 'ci' strips ANSI escape sequences, carriage-return rewrites, leading "
+        "timestamps (ISO 8601, [HH:MM:SS], HH:MM:SS.mmm), folds runs of identical lines into "
+        "one suffixed [×N] and runs of blank lines into one, and reports filter_stats. Lossy: "
+        "use 'none' when exact bytes matter; sha256, size, offset and returned_bytes always "
+        "describe the raw log."
+    ),
+}
+_ACTION_LOG_FILTER_STATS = _object_schema(
+    {
+        name: {"type": "integer", "minimum": 0}
+        for name in (
+            "removed_ansi",
+            "removed_carriage_returns",
+            "removed_timestamps",
+            "collapsed_lines",
+            "removed_blank_lines",
+            "original_lines",
+            "filtered_lines",
+        )
+    },
+    [
+        "removed_ansi",
+        "removed_carriage_returns",
+        "removed_timestamps",
+        "collapsed_lines",
+        "removed_blank_lines",
+        "original_lines",
+        "filtered_lines",
+    ],
+)
 _ACTION_LOG_SCHEMA = _object_schema(
     {
         "job_id": _NUMBER,
@@ -523,9 +601,12 @@ _ACTION_LOG_SCHEMA = _object_schema(
         "size": {"type": "integer", "minimum": 0},
         "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "content": {"type": "string"},
+        "offset": {"type": "integer", "minimum": 0},
+        "returned_bytes": {"type": "integer", "minimum": 0},
         "truncated": {"type": "boolean"},
+        "filter_stats": _ACTION_LOG_FILTER_STATS,
     },
-    ["job_id", "attempt", "size", "sha256", "content", "truncated"],
+    ["job_id", "attempt", "size", "sha256", "content", "offset", "returned_bytes", "truncated"],
 )
 _ACTION_LOG_FILE_SCHEMA = _object_schema(
     {
@@ -533,9 +614,12 @@ _ACTION_LOG_FILE_SCHEMA = _object_schema(
         "size": {"type": "integer", "minimum": 0},
         "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "content": {"type": "string"},
+        "offset": {"type": "integer", "minimum": 0},
+        "returned_bytes": {"type": "integer", "minimum": 0},
         "truncated": {"type": "boolean"},
+        "filter_stats": _ACTION_LOG_FILTER_STATS,
     },
-    ["name", "size", "sha256", "content", "truncated"],
+    ["name", "size", "sha256"],
 )
 
 _MIGRATION_BOOLEAN = {"type": "boolean"}
@@ -1611,7 +1695,11 @@ _TOOL_SPECS = (
     ToolSpec(
         name="forgejo_get_action_job_log",
         title="Get action job log",
-        description="Return up to 1 MiB of plaintext log content for an action job attempt.",
+        description=(
+            "Return a bounded window of plaintext log content for an action job attempt: "
+            "the last 64 KiB by default, up to 1 MiB, with head/tail offsets, an optional "
+            "case-insensitive line filter and an opt-in CI noise filter."
+        ),
         risk="read-sensitive",
         input_schema=_object_schema(
             {
@@ -1619,6 +1707,11 @@ _TOOL_SPECS = (
                 "repo": _REPO,
                 "job_id": _NUMBER,
                 "attempt": _NUMBER,
+                "max_bytes": _ACTION_LOG_WINDOW_BYTES,
+                "from_end": _ACTION_LOG_FROM_END,
+                "offset": _ACTION_LOG_OFFSET,
+                "grep": _ACTION_LOG_GREP,
+                "filter": _ACTION_LOG_FILTER,
             },
             ["owner", "repo", "job_id"],
         ),
@@ -1627,10 +1720,21 @@ _TOOL_SPECS = (
     ToolSpec(
         name="forgejo_get_action_run_logs",
         title="Get action run logs",
-        description="Return bounded plaintext files extracted from an action run log archive.",
+        description=(
+            "Return an index (name, size, SHA-256) of the files in an action run log archive; "
+            "with include_content, also return a bounded tail window of each file, optionally "
+            "passed through the CI noise filter."
+        ),
         risk="read-sensitive",
         input_schema=_object_schema(
-            {"owner": _OWNER, "repo": _REPO, "run_id": _NUMBER},
+            {
+                "owner": _OWNER,
+                "repo": _REPO,
+                "run_id": _NUMBER,
+                "include_content": _ACTION_LOG_INCLUDE_CONTENT,
+                "max_bytes_per_file": _ACTION_LOG_PER_FILE_BYTES,
+                "filter": _ACTION_LOG_FILTER,
+            },
             ["owner", "repo", "run_id"],
         ),
         output_schema=_object_schema(
