@@ -756,3 +756,97 @@ async def test_list_repositories_compact_items_bound_description_and_drop_links(
         await client.list_repositories(
             **common, page=1, limit=30, order_by="recentupdate", fields="verbose"
         )
+
+
+def _pooled_client() -> ForgejoClient:
+    return ForgejoClient(connect_timeout_seconds=5.0)
+
+
+async def test_shared_pool_is_reused_across_client_instances() -> None:
+    """Services are built per request, so the pool must be shared at module scope."""
+    await client_module.aclose_shared_forgejo_clients()
+    async with _pooled_client()._acquire_client(True) as first:
+        pass
+    async with _pooled_client()._acquire_client(True) as second:
+        pass
+    assert first is second
+    assert not first.is_closed
+    await client_module.aclose_shared_forgejo_clients()
+    assert first.is_closed
+    assert client_module._SHARED_CLIENTS == {}
+
+
+async def test_shared_pool_separates_tls_policies() -> None:
+    await client_module.aclose_shared_forgejo_clients()
+    client = _pooled_client()
+    async with client._acquire_client(True) as verified:
+        pass
+    async with client._acquire_client(False) as unverified:
+        pass
+    assert verified is not unverified
+    await client_module.aclose_shared_forgejo_clients()
+
+
+async def test_injected_transport_stays_request_scoped() -> None:
+    """A test transport must not leak into, or be replaced by, the shared pool."""
+    await client_module.aclose_shared_forgejo_clients()
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={}))
+    client = ForgejoClient(connect_timeout_seconds=5.0, transport=transport)
+    async with client._acquire_client(True) as first:
+        assert not first.is_closed
+    assert first.is_closed
+    async with client._acquire_client(True) as second:
+        pass
+    assert first is not second
+    assert client_module._SHARED_CLIENTS == {}
+
+
+async def test_ssl_context_is_built_once(monkeypatch) -> None:
+    calls = 0
+    real = client_module.ssl.create_default_context
+
+    def counting() -> object:
+        nonlocal calls
+        calls += 1
+        return real()
+
+    monkeypatch.setattr(client_module, "_SHARED_SSL_CONTEXT", None)
+    monkeypatch.setattr(client_module.ssl, "create_default_context", counting)
+    assert client_module._verify_option(True) is client_module._verify_option(True)
+    assert calls == 1
+    assert client_module._verify_option(False) is False
+    assert calls == 1
+
+
+async def test_accept_header_is_sent_per_request() -> None:
+    """The shared client cannot carry Accept: each call declares its own."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["Accept"])
+        return httpx.Response(200, json={"ok": True})
+
+    client = ForgejoClient(connect_timeout_seconds=5.0, transport=httpx.MockTransport(handler))
+    await client._request(
+        method="GET",
+        endpoint="https://forgejo.test/api/v1/version",
+        token="t",
+        verify_tls=True,
+        params=None,
+        json_body=None,
+        resource="version",
+        expected_status=200,
+        accept="application/json",
+    )
+    await client._request(
+        method="GET",
+        endpoint="https://forgejo.test/api/v1/logs",
+        token="t",
+        verify_tls=True,
+        params=None,
+        json_body=None,
+        resource="logs",
+        expected_status=200,
+        accept="text/plain",
+    )
+    assert seen == ["application/json", "text/plain"]

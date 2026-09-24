@@ -30,6 +30,7 @@ from forgejo_mcp.application.oauth_service import OAuthService
 from forgejo_mcp.application.runtime import InvocationCoordinator
 from forgejo_mcp.config import Settings, get_settings
 from forgejo_mcp.db.session import create_engine, create_session_factory
+from forgejo_mcp.forgejo.client import aclose_shared_forgejo_clients
 from forgejo_mcp.mcp.server import build_mcp_runtime
 from forgejo_mcp.observability import configure_logging
 from forgejo_mcp.observability.middleware import (
@@ -65,6 +66,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     },
                 )
     finally:
+        await aclose_shared_forgejo_clients()
         await engine.dispose()
 
 
