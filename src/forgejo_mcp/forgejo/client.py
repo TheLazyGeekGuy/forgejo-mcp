@@ -5,9 +5,12 @@ import hashlib
 import io
 import ipaddress
 import re
+import ssl
 import time
 import zipfile
 import zlib
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -190,6 +193,34 @@ _REPOSITORY_ORDER_VALUES = {
 }
 
 
+_CLIENT_HEADERS = {
+    "Accept-Encoding": "gzip, deflate",
+    "User-Agent": "forgejo-mcp/0.1.0",
+}
+_SHARED_SSL_CONTEXT: ssl.SSLContext | None = None
+_SHARED_CLIENTS: dict[
+    tuple[float | None, float | None, float | None, float | None, bool], httpx.AsyncClient
+] = {}
+
+
+def _verify_option(verify_tls: bool) -> ssl.SSLContext | bool:
+    """Reuse one SSL context: building it parses the CA bundle and costs ~19 ms of CPU."""
+    global _SHARED_SSL_CONTEXT
+    if not verify_tls:
+        return False
+    if _SHARED_SSL_CONTEXT is None:
+        _SHARED_SSL_CONTEXT = ssl.create_default_context()
+    return _SHARED_SSL_CONTEXT
+
+
+async def aclose_shared_forgejo_clients() -> None:
+    """Close the process-wide Forgejo connection pools during application shutdown."""
+    clients = list(_SHARED_CLIENTS.values())
+    _SHARED_CLIENTS.clear()
+    for client in clients:
+        await client.aclose()
+
+
 class ForgejoClient:
     def __init__(
         self,
@@ -217,6 +248,40 @@ class ForgejoClient:
         self.commit_max_total_bytes = commit_max_total_bytes
         self.migration_allow_private_hosts = migration_allow_private_hosts
         self.transport = transport
+
+    def _shared_client(self, verify_tls: bool) -> httpx.AsyncClient:
+        key = (
+            self.timeout.connect,
+            self.timeout.read,
+            self.timeout.write,
+            self.timeout.pool,
+            verify_tls,
+        )
+        client = _SHARED_CLIENTS.get(key)
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(
+                timeout=self.timeout,
+                verify=_verify_option(verify_tls),
+                follow_redirects=False,
+                headers=_CLIENT_HEADERS,
+            )
+            _SHARED_CLIENTS[key] = client
+        return client
+
+    @asynccontextmanager
+    async def _acquire_client(self, verify_tls: bool) -> AsyncIterator[httpx.AsyncClient]:
+        """Share one pool per TLS policy; an injected transport stays request-scoped."""
+        if self.transport is None:
+            yield self._shared_client(verify_tls)
+            return
+        async with httpx.AsyncClient(
+            timeout=self.timeout,
+            verify=_verify_option(verify_tls),
+            follow_redirects=False,
+            headers=_CLIENT_HEADERS,
+            transport=self.transport,
+        ) as client:
+            yield client
 
     async def list_repositories(
         self,
@@ -1928,23 +1993,15 @@ class ForgejoClient:
     ) -> httpx.Response:
         method = method.upper()
         retries = self.safe_retry_attempts if method in {"GET", "HEAD", "OPTIONS"} else 0
-        headers = {"Authorization": f"token {token}"} if token is not None else None
+        headers = {"Accept": accept}
+        if token is not None:
+            headers["Authorization"] = f"token {token}"
         response: httpx.Response | None = None
         for attempt in range(retries + 1):
             started = time.monotonic()
             try:
                 async with (
-                    httpx.AsyncClient(
-                        timeout=self.timeout,
-                        verify=verify_tls,
-                        follow_redirects=False,
-                        headers={
-                            "Accept": accept,
-                            "Accept-Encoding": "gzip, deflate",
-                            "User-Agent": "forgejo-mcp/0.1.0",
-                        },
-                        transport=self.transport,
-                    ) as client,
+                    self._acquire_client(verify_tls) as client,
                     client.stream(
                         method,
                         endpoint,
