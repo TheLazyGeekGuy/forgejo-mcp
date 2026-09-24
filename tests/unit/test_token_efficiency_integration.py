@@ -228,6 +228,9 @@ async def test_every_lean_list_tool_validates_its_schema_when_serialized(
     """
     result, _ = await _dispatch(handler, name, {**arguments, "fields": fields})
 
+    # The envelope declares the lossy mode and only the lossy mode: a compact answer
+    # says so, a full one spends no byte saying there was nothing to cut.
+    assert result.get("fields") == ("compact" if fields == "compact" else None)
     items = result["items"]
     assert len(items) == 3
     for item in items:
@@ -341,6 +344,42 @@ async def test_grep_and_filter_combine_on_the_same_window() -> None:
     assert result["filter_stats"]["removed_ansi"] > 0
 
 
+async def test_grep_reports_the_size_of_the_match_set_it_windows() -> None:
+    """``truncated`` on a grep'd log is unreadable without the size it is measured against.
+
+    ``size`` keeps describing the raw log, so a caller comparing ``returned_bytes`` to it
+    would call a complete match set truncated. ``filtered_size`` is that missing
+    denominator, and it exists only when ``grep`` is set.
+    """
+    raw = _noisy_log()
+    whole, _ = await _dispatch(
+        _job_log_handler,
+        "forgejo_get_action_job_log",
+        {**_LIST_ARGUMENTS, "job_id": 51, "grep": "repeated line"},
+    )
+    windowed, _ = await _dispatch(
+        _job_log_handler,
+        "forgejo_get_action_job_log",
+        {**_LIST_ARGUMENTS, "job_id": 51, "grep": "repeated line", "max_bytes": 64},
+    )
+    ungrepped, _ = await _dispatch(
+        _job_log_handler,
+        "forgejo_get_action_job_log",
+        {**_LIST_ARGUMENTS, "job_id": 51, "max_bytes": 64},
+    )
+
+    # The match set is a strict subset of the raw log, and smaller than it.
+    assert 0 < whole["filtered_size"] < len(raw) == whole["size"]
+    assert whole["returned_bytes"] == whole["filtered_size"]
+    assert whole["truncated"] is False
+    # Windowed: the cut is readable only against ``filtered_size``, never against ``size``.
+    assert windowed["filtered_size"] == whole["filtered_size"]
+    assert windowed["returned_bytes"] < windowed["filtered_size"]
+    assert windowed["truncated"] is True
+    # No grep, no denominator to pay for.
+    assert "filtered_size" not in ungrepped
+
+
 def _archive() -> bytes:
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
@@ -361,6 +400,8 @@ async def test_run_log_index_and_filtered_content_validate_their_schema() -> Non
 
     assert [entry["name"] for entry in index["files"]] == ["0_build.txt", "1_test.txt"]
     assert all("content" not in entry for entry in index["files"]), "index must stay contentless"
+    # An index-only answer announces the omission, so contentless never reads as empty.
+    assert index["content_included"] is False
 
     full, text = await _dispatch(
         _run_logs_handler,
@@ -381,6 +422,8 @@ async def test_run_log_index_and_filtered_content_validate_their_schema() -> Non
     assert "\x1b[" not in build["content"]
     assert build["filter_stats"]["removed_ansi"] > 0
     assert '"filter_stats":' in text
+    # The content is there: nothing to announce, no byte spent announcing it.
+    assert "content_included" not in full
 
 
 def _section(path: str, lines: int = 6) -> str:

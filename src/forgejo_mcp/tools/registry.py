@@ -97,16 +97,26 @@ def _list_item_schema(
     return _object_schema(properties, required)
 
 
-def _page_schema(item_schema: dict[str, Any]) -> dict[str, Any]:
-    return _object_schema(
-        {
-            "items": {"type": "array", "items": item_schema},
-            "page": {"type": "integer", "minimum": 1},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
-            "has_more": {"type": "boolean"},
-        },
-        ["items", "page", "limit", "has_more"],
-    )
+_FIELDS_DECLARATION = {
+    "type": "string",
+    "const": "compact",
+    "description": (
+        "Present only when the compact form was applied, marking the items as shortened; "
+        "absent under `fields=full`, which returns whole items."
+    ),
+}
+
+
+def _page_schema(item_schema: dict[str, Any], *, fields_aware: bool = False) -> dict[str, Any]:
+    properties: dict[str, Any] = {
+        "items": {"type": "array", "items": item_schema},
+        "page": {"type": "integer", "minimum": 1},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+        "has_more": {"type": "boolean"},
+    }
+    if fields_aware:
+        properties["fields"] = _FIELDS_DECLARATION
+    return _object_schema(properties, ["items", "page", "limit", "has_more"])
 
 
 _OWNER = {
@@ -126,7 +136,9 @@ _LIMIT = {"type": "integer", "minimum": 1, "maximum": 100, "default": 30}
 _FIELDS = {"type": "string", "enum": ["compact", "full"], "default": "compact"}
 _FIELDS_DESCRIPTION = (
     " `fields=compact` (default) bounds long text to a 200-character excerpt and omits"
-    " `html_url`/`avatar_url`; `fields=full` returns complete items."
+    ' `html_url`/`avatar_url`; the answer then carries `fields: "compact"` and each'
+    " shortened item its own `*_truncated` flag, so a compact value is never mistaken for"
+    " the whole one. `fields=full` returns complete items and omits that marker."
 )
 _REPOSITORY_LIST_SCHEMA = _list_item_schema(
     _repository_schema(), truncation_flag="description_truncated", after="description"
@@ -543,13 +555,17 @@ _ACTION_LOG_GREP = {
     "description": (
         "Case-insensitive substring filter: only matching lines are returned, each prefixed "
         "with its 1-based line number; max_bytes, from_end and offset apply to the filtered "
-        "text. An empty string disables the filter."
+        "text, whose full length is reported as `filtered_size` (`size` and `sha256` keep "
+        "describing the raw log). An empty string disables the filter."
     ),
 }
 _ACTION_LOG_INCLUDE_CONTENT = {
     "type": "boolean",
     "default": False,
-    "description": "Include a bounded window of each file; by default only the index is returned.",
+    "description": (
+        "Include a bounded window of each file. By default only the index is returned and "
+        "the answer carries `content_included: false`; set this to true to read the logs."
+    ),
 }
 _ACTION_LOG_PER_FILE_BYTES = {
     "type": "integer",
@@ -567,8 +583,9 @@ _ACTION_LOG_FILTER = {
         "offset/grep: 'ci' strips ANSI escape sequences, carriage-return rewrites, leading "
         "timestamps (ISO 8601, [HH:MM:SS], HH:MM:SS.mmm), folds runs of identical lines into "
         "one suffixed [×N] and runs of blank lines into one, and reports filter_stats. Lossy: "
-        "use 'none' when exact bytes matter; sha256, size, offset and returned_bytes always "
-        "describe the raw log."
+        "use 'none' when exact bytes matter; `size` and `sha256` always describe the whole raw "
+        "log, never the returned `content`, while `offset`, `returned_bytes` and `truncated` "
+        "describe the window cut out of it (out of the grep output when `grep` is set)."
     ),
 }
 _ACTION_LOG_FILTER_STATS = _object_schema(
@@ -604,6 +621,7 @@ _ACTION_LOG_SCHEMA = _object_schema(
         "offset": {"type": "integer", "minimum": 0},
         "returned_bytes": {"type": "integer", "minimum": 0},
         "truncated": {"type": "boolean"},
+        "filtered_size": {"type": "integer", "minimum": 0},
         "filter_stats": _ACTION_LOG_FILTER_STATS,
     },
     ["job_id", "attempt", "size", "sha256", "content", "offset", "returned_bytes", "truncated"],
@@ -761,7 +779,7 @@ _TOOL_SPECS = (
             },
             [],
         ),
-        output_schema=_page_schema(_REPOSITORY_LIST_SCHEMA),
+        output_schema=_page_schema(_REPOSITORY_LIST_SCHEMA, fields_aware=True),
     ),
     ToolSpec(
         name="forgejo_get_repository",
@@ -1044,7 +1062,7 @@ _TOOL_SPECS = (
             },
             ["owner", "repo"],
         ),
-        output_schema=_page_schema(_ISSUE_LIST_SCHEMA),
+        output_schema=_page_schema(_ISSUE_LIST_SCHEMA, fields_aware=True),
     ),
     ToolSpec(
         name="forgejo_get_issue",
@@ -1076,6 +1094,7 @@ _TOOL_SPECS = (
             {
                 "items": {"type": "array", "items": _COMMENT_LIST_SCHEMA, "maxItems": 100},
                 "truncated": {"type": "boolean"},
+                "fields": _FIELDS_DECLARATION,
             },
             ["items", "truncated"],
         ),
@@ -1113,7 +1132,7 @@ _TOOL_SPECS = (
             },
             ["owner", "repo"],
         ),
-        output_schema=_page_schema(_PR_LIST_SCHEMA),
+        output_schema=_page_schema(_PR_LIST_SCHEMA, fields_aware=True),
     ),
     ToolSpec(
         name="forgejo_get_pull_request",
@@ -1150,7 +1169,10 @@ _TOOL_SPECS = (
             "first to list changed paths, then request only the paths you need. `paths` keeps "
             "only the matching `diff --git` sections (renames match either name); `max_bytes` "
             "(default 65536) and `offset` page through the filtered diff on line boundaries; "
-            "continue from `offset + returned_bytes` while `truncated` is true."
+            "continue from `offset + returned_bytes` while `truncated` is true. `size` is the "
+            "path-filtered diff and `total_size`/`sha256` the whole upstream diff: `sha256` "
+            "identifies the source document across paged calls and is never a digest of the "
+            "returned `content`."
         ),
         risk="read-sensitive",
         input_schema=_object_schema(
@@ -1698,7 +1720,8 @@ _TOOL_SPECS = (
         description=(
             "Return a bounded window of plaintext log content for an action job attempt: "
             "the last 64 KiB by default, up to 1 MiB, with head/tail offsets, an optional "
-            "case-insensitive line filter and an opt-in CI noise filter."
+            "case-insensitive line filter and an opt-in CI noise filter. `size` and `sha256` "
+            "describe the whole raw log, never the returned `content`."
         ),
         risk="read-sensitive",
         input_schema=_object_schema(
@@ -1723,7 +1746,9 @@ _TOOL_SPECS = (
         description=(
             "Return an index (name, size, SHA-256) of the files in an action run log archive; "
             "with include_content, also return a bounded tail window of each file, optionally "
-            "passed through the CI noise filter."
+            "passed through the CI noise filter. Every `size`/`sha256` describes a whole raw "
+            "document — the archive at the top level, each file in its entry — never the "
+            "returned `content`."
         ),
         risk="read-sensitive",
         input_schema=_object_schema(
@@ -1748,6 +1773,7 @@ _TOOL_SPECS = (
                     "maxItems": 100,
                 },
                 "files_truncated": {"type": "boolean"},
+                "content_included": {"type": "boolean", "const": False},
             },
             ["run_id", "size", "sha256", "files", "files_truncated"],
         ),

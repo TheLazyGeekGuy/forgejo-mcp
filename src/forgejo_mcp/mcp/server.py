@@ -317,14 +317,15 @@ async def _execute_tool(
         principal = await tools.get_current_user(user_id)
         return {"id": principal.id, "username": principal.username}
     if name == "forgejo_list_repositories":
+        repository_fields = cast(str, arguments.get("fields", "compact"))
         repository_page = await tools.list_repositories(
             user_id,
             page=cast(int, arguments.get("page", 1)),
             limit=cast(int, arguments.get("limit", 30)),
             order_by=cast(str, arguments.get("order_by", "recentupdate")),
-            fields=cast(str, arguments.get("fields", "compact")),
+            fields=repository_fields,
         )
-        return _page_result(repository_page)
+        return _page_result(repository_page, repository_fields)
     if name == "forgejo_get_repository":
         repository = await tools.get_repository(
             user_id,
@@ -431,6 +432,7 @@ async def _execute_tool(
             )
         )
     if name == "forgejo_list_issues":
+        issue_fields = cast(str, arguments.get("fields", "compact"))
         return _page_result(
             await tools.list_issues(
                 user_id,
@@ -444,27 +446,33 @@ async def _execute_tool(
                 sort=cast(str, arguments.get("sort", "latest")),
                 page=cast(int, arguments.get("page", 1)),
                 limit=cast(int, arguments.get("limit", 30)),
-                fields=cast(str, arguments.get("fields", "compact")),
-            )
+                fields=issue_fields,
+            ),
+            issue_fields,
         )
     if name == "forgejo_get_issue":
         return (
             await tools.get_issue(user_id, **common, number=cast(int, arguments["number"]))
         ).model_dump(mode="json")
     if name == "forgejo_list_issue_comments":
+        comment_fields = cast(str, arguments.get("fields", "compact"))
         comments_result = await tools.list_issue_comments(
             user_id,
             **common,
             number=cast(int, arguments["number"]),
             since=cast(str | None, arguments.get("since")),
             before=cast(str | None, arguments.get("before")),
-            fields=cast(str, arguments.get("fields", "compact")),
+            fields=comment_fields,
         )
-        return {
-            "items": [item.model_dump(mode="json") for item in comments_result.items],
-            "truncated": comments_result.truncated,
-        }
+        return _declare_fields(
+            {
+                "items": [item.model_dump(mode="json") for item in comments_result.items],
+                "truncated": comments_result.truncated,
+            },
+            comment_fields,
+        )
     if name == "forgejo_list_pull_requests":
+        pull_request_fields = cast(str, arguments.get("fields", "compact"))
         return _page_result(
             await tools.list_pull_requests(
                 user_id,
@@ -477,8 +485,9 @@ async def _execute_tool(
                 sort=cast(str, arguments.get("sort", "recentupdate")),
                 page=cast(int, arguments.get("page", 1)),
                 limit=cast(int, arguments.get("limit", 30)),
-                fields=cast(str, arguments.get("fields", "compact")),
-            )
+                fields=pull_request_fields,
+            ),
+            pull_request_fields,
         )
     if name == "forgejo_get_pull_request":
         return (
@@ -766,16 +775,30 @@ def _safe_error_message(error: Exception) -> str:
     return "Internal tool execution error"
 
 
-def _page_result(result: Any) -> dict[str, Any]:
-    return {
-        "items": [
-            item.model_dump(mode="json") if hasattr(item, "model_dump") else item
-            for item in result.items
-        ],
-        "page": result.page,
-        "limit": result.limit,
-        "has_more": result.has_more,
-    }
+def _declare_fields(payload: dict[str, Any], fields: str | None) -> dict[str, Any]:
+    """Record that the compact form shortened long text and dropped link fields.
+
+    Only the lossy mode is declared: ``fields=full`` returns whole items, so there is
+    nothing to warn about and no byte to spend saying so.
+    """
+    if fields == "compact":
+        payload["fields"] = "compact"
+    return payload
+
+
+def _page_result(result: Any, fields: str | None = None) -> dict[str, Any]:
+    return _declare_fields(
+        {
+            "items": [
+                item.model_dump(mode="json") if hasattr(item, "model_dump") else item
+                for item in result.items
+            ],
+            "page": result.page,
+            "limit": result.limit,
+            "has_more": result.has_more,
+        },
+        fields,
+    )
 
 
 def build_tool_definition(spec: ToolSpec, *, structured_output: bool) -> Tool:
