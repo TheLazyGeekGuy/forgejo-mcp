@@ -989,12 +989,12 @@ class ForgejoClient:
             raise ExternalServiceUnavailable(
                 "Forgejo returned an invalid pull request diff"
             ) from error
-        sections = split_diff_sections(content)
         if requested is None:
             filtered = content
-            files_included = [section.path for section in sections]
+            files_included = diff_file_paths(content)
             files_missing: list[str] = []
         else:
+            sections = split_diff_sections(content)
             wanted = set(requested)
             filtered = "".join(section.text for section in sections if section.paths & wanted)
             found = frozenset().union(*(section.paths for section in sections)) & wanted
@@ -2514,6 +2514,33 @@ def split_diff_sections(content: str) -> list[DiffSection]:
     if current_paths is not None:
         sections.append(DiffSection("".join(current), current_paths[0], current_paths[1]))
     return sections
+
+
+def diff_file_paths(content: str) -> list[str]:
+    """Return the post-image path of every ``diff --git`` section, in order.
+
+    Only the header lines are read, so a caller that keeps the whole diff pays neither
+    the per-line accumulation nor the section rebuild that :func:`split_diff_sections`
+    performs. The result matches ``[section.path for section in split_diff_sections(...)]``.
+    """
+
+    paths: list[str] = []
+    start = 0 if content.startswith(_DIFF_HEADER_PREFIX) else _next_diff_header(content, 0)
+    while start >= 0:
+        end = content.find("\n", start)
+        line = content[start:] if end < 0 else content[start:end]
+        paths.append(_diff_header_paths(line[len(_DIFF_HEADER_PREFIX) :].rstrip("\r\n"))[0])
+        if end < 0:
+            break
+        start = _next_diff_header(content, end)
+    return paths
+
+
+def _next_diff_header(content: str, position: int) -> int:
+    """Return the start of the next header line at or after ``position``, or ``-1``."""
+
+    index = content.find("\n" + _DIFF_HEADER_PREFIX, position)
+    return -1 if index < 0 else index + 1
 
 
 def _diff_header_paths(rest: str) -> tuple[str, frozenset[str]]:

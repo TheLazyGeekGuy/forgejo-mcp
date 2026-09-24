@@ -10,6 +10,7 @@ from forgejo_mcp.forgejo.client import (
     DEFAULT_DIFF_WINDOW_BYTES,
     MAX_DIFF_BYTES,
     ForgejoClient,
+    diff_file_paths,
     split_diff_sections,
 )
 from forgejo_mcp.tools.registry import get_tool
@@ -73,6 +74,47 @@ def test_split_diff_sections_reads_quoted_and_spaced_headers() -> None:
 
     assert "café x.txt" in sections[0].paths
     assert "with space.txt" in sections[1].paths
+
+
+def test_diff_file_paths_matches_the_section_split() -> None:
+    """The header-only scan must agree with the full split on every shape it accepts."""
+
+    tricky = (
+        "diff --git a/x b/x\n+text\x0cdiff --git a/fake b/fake\n+more\u2028diff --git a/y b/y\n"
+    )
+    quoted = 'diff --git "a/caf\\303\\251 x.txt" "b/caf\\303\\251 x.txt"\n+x\n'
+    spaced = "diff --git a/with space.txt b/with space.txt\n+y\n"
+    corpora = [
+        THREE_FILES,
+        tricky,
+        quoted + spaced,
+        "",
+        "no header at all\n",
+        "preamble\ndiff --git a/a b/a\n+1\n",
+        "diff --git a/a b/a",
+        "\ndiff --git a/a b/a\n",
+        "diff --git a/a b/a\r\n+x\r\n",
+        "diff --git ",
+    ]
+
+    for corpus in corpora:
+        assert diff_file_paths(corpus) == [item.path for item in split_diff_sections(corpus)]
+
+
+async def test_unfiltered_diff_lists_every_file_without_splitting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller that passes no ``paths`` must not pay the section split at all."""
+
+    def fail(content: str) -> list[object]:
+        raise AssertionError("split_diff_sections ran for an unfiltered diff")
+
+    monkeypatch.setattr("forgejo_mcp.forgejo.client.split_diff_sections", fail)
+    diff = await client_for(THREE_FILES.encode()).get_pull_request_diff(**COMMON, number=8)
+
+    assert diff.files_included == ["src/a.py", "src/b.py", "docs/c.md"]
+    assert diff.files_missing == []
+    assert diff.content == THREE_FILES
 
 
 async def test_paths_select_one_section_of_three() -> None:
