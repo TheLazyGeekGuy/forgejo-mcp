@@ -113,6 +113,14 @@ class BoundedList[T]:
 
 @dataclass(frozen=True)
 class DiffContent:
+    """A pull request diff, optionally filtered by path and windowed by offset/max_bytes.
+
+    ``size`` measures the path-filtered diff, ``total_size`` and ``sha256`` the whole
+    upstream document, and ``returned_bytes`` the window actually carried by ``content``.
+    ``sha256`` therefore identifies the source diff across paged calls; it is never a
+    digest of ``content``.
+    """
+
     number: int
     format: str
     size: int
@@ -1497,6 +1505,10 @@ class ForgejoClient:
             "returned_bytes": len(window),
             "truncated": len(window) < len(source),
         }
+        if needle is not None:
+            # ``offset`` and ``truncated`` are measured against the grep output, not the raw
+            # log, so the caller needs its size to tell a complete match set from a window.
+            result["filtered_size"] = len(source)
         return _apply_log_filter(result, noise_filter)
 
     async def get_action_run_logs(
@@ -1578,13 +1590,17 @@ class ForgejoClient:
             raise ExternalServiceUnavailable(
                 "Forgejo returned an invalid action run logs archive"
             ) from error
-        return {
+        result: dict[str, Any] = {
             "run_id": run_id,
             "size": len(archive),
             "sha256": hashlib.sha256(archive).hexdigest(),
             "files": files,
             "files_truncated": files_truncated,
         }
+        if not include_content:
+            # Declare the omission so an index-only answer cannot read as an empty log.
+            result["content_included"] = False
+        return result
 
     async def list_action_run_artifacts(
         self,
@@ -2720,9 +2736,10 @@ def _log_filter(value: str) -> str:
 def _apply_log_filter(item: dict[str, Any], noise_filter: str) -> dict[str, Any]:
     """Replace ``item["content"]`` by its filtered form and declare what was removed.
 
-    The filter runs on the already cut window, never on the raw log, so ``offset``,
-    ``returned_bytes``, ``size`` and ``sha256`` keep describing the raw bytes. With
-    ``"none"`` the item is returned untouched and carries no ``filter_stats``.
+    The filter runs on the already cut window, never on the raw log, so ``size`` and
+    ``sha256`` keep describing the whole raw document while ``offset``, ``returned_bytes``
+    and ``truncated`` keep describing the window cut out of it. With ``"none"`` the item is
+    returned untouched and carries no ``filter_stats``.
     """
     if noise_filter == "none":
         return item

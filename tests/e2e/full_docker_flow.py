@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import base64
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -10,6 +11,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
+from forgejo_mcp.forgejo.excerpt import EXCERPT_MAX_CHARS, EXCERPT_SUFFIX
 from forgejo_mcp.tools import list_tools
 
 APP_URL = os.getenv("FMCP_E2E_APP_URL", "http://127.0.0.1:3800").rstrip("/")
@@ -22,6 +24,9 @@ DEVELOPER_LOCAL_PASSWORD = "Developer-local-pass-123!"
 OAUTH_RESOURCE = f"{APP_URL}/mcp"
 OAUTH_REDIRECT_URI = "http://127.0.0.1/oauth/callback"
 MCP_PROTOCOL_VERSION = "2025-06-18"
+# Longer than the 200-character compact excerpt, so `fields=compact` must visibly cut it.
+_LONG_BODY = "Implement greeting. " * 30
+
 FORGEJO_PAT_SCOPES = [
     "read:user",
     "write:organization",
@@ -524,6 +529,39 @@ class McpClient:
         return result["structuredContent"]
 
 
+def _assert_fields_cuts_and_says_so(
+    client: "McpClient", tool: str, arguments: dict[str, Any]
+) -> None:
+    """`fields=compact` must cut, declare the cut, and measurably cost fewer bytes.
+
+    The default is the lossy mode, so the answer has to be readable as such: the envelope
+    carries `fields: "compact"`, every shortened item carries its own `*_truncated` flag,
+    and the link fields are gone. `fields=full` returns whole items and spends no byte
+    saying there was nothing to cut.
+    """
+    compact = client.call(tool, {**arguments, "fields": "compact"})
+    full = client.call(tool, {**arguments, "fields": "full"})
+
+    assert compact["fields"] == "compact", "the compact form must declare itself"
+    assert "fields" not in full, "the full form has no cut to announce"
+    assert len(compact["items"]) == len(full["items"]) > 0
+    for short_item, whole_item in zip(compact["items"], full["items"], strict=True):
+        assert "html_url" in whole_item and "html_url" not in short_item
+        assert short_item["body_truncated"] is True, "the long body must be cut"
+        assert whole_item["body_truncated"] is False
+        assert len(short_item["body"]) < len(whole_item["body"])
+        # The excerpt is the head of the whole body, cut on a word boundary, right-stripped
+        # and marked. Comparing the marked head is what proves the compact form shortened
+        # the same text instead of returning some other, shorter one.
+        assert short_item["body"].endswith(EXCERPT_SUFFIX), "a cut body must be marked as cut"
+        head = short_item["body"].removesuffix(EXCERPT_SUFFIX)
+        assert 0 < len(head) <= EXCERPT_MAX_CHARS
+        assert whole_item["body"].startswith(head)
+    compact_bytes = len(json.dumps(compact, separators=(",", ":")))
+    full_bytes = len(json.dumps(full, separators=(",", ":")))
+    assert compact_bytes < full_bytes, "the compact form must actually save bytes"
+
+
 def run_mcp_flow(mcp_tokens: dict[str, str]) -> None:
     developer = McpClient(mcp_tokens["developer"])
     reviewer = McpClient(mcp_tokens["reviewer"])
@@ -624,6 +662,16 @@ def run_mcp_flow(mcp_tokens: dict[str, str]) -> None:
                         "jobs:\n  test:\n    runs-on: docker\n"
                         "    steps:\n      - name: Produce result\n        run: |\n"
                         "          sleep '${{ inputs.delay }}'\n"
+                        # Deterministic material for the grep and ci-filter witnesses below:
+                        # an ANSI sequence the filter must strip and a line the grep must drop.
+                        # The markers are assembled at run time so no marker string appears in
+                        # the script itself: if the runner echoes the script into the log, the
+                        # grep witness must still match output lines only.
+                        "          m=marker\n"
+                        "          printf '\\033[31m%s-ansi\\033[0m\\n' \"$m\"\n"
+                        "          printf '%s-repeat\\n' \"$m\"\n"
+                        "          printf '%s-repeat\\n' \"$m\"\n"
+                        "          printf '%s-unique\\n' \"$m\"\n"
                         "          echo ok | tee result.txt\n"
                     ),
                 },
@@ -701,7 +749,7 @@ def run_mcp_flow(mcp_tokens: dict[str, str]) -> None:
 
     issue = developer.call(
         "forgejo_create_issue",
-        {**repository, "title": "Add greeting", "body": "Implement greeting"},
+        {**repository, "title": "Add greeting", "body": _LONG_BODY},
     )["issue"]
     developer.call(
         "forgejo_comment_issue",
@@ -712,6 +760,9 @@ def run_mcp_flow(mcp_tokens: dict[str, str]) -> None:
         {**repository, "state": "open", "limit": 100},
     )
     assert any(item["number"] == issue["number"] for item in issues["items"])
+    _assert_fields_cuts_and_says_so(
+        developer, "forgejo_list_issues", {**repository, "state": "open", "limit": 100}
+    )
     loaded_issue = developer.call("forgejo_get_issue", {**repository, "number": issue["number"]})
     assert loaded_issue["title"] == "Add greeting"
     comments = developer.call(
@@ -737,7 +788,8 @@ def run_mcp_flow(mcp_tokens: dict[str, str]) -> None:
             "title": "Add greeting",
             "head": branch["name"],
             "base": "main",
-            "body": f"Closes #{issue['number']}",
+            # Long enough that `fields=compact` must visibly cut it, like the issue body.
+            "body": f"Closes #{issue['number']}. {_LONG_BODY}",
         },
     )["pull_request"]
     pull_commits = developer.call(
@@ -755,6 +807,9 @@ def run_mcp_flow(mcp_tokens: dict[str, str]) -> None:
         {**repository, "state": "open", "limit": 100},
     )
     assert any(item["number"] == pull["number"] for item in pulls["items"])
+    _assert_fields_cuts_and_says_so(
+        developer, "forgejo_list_pull_requests", {**repository, "state": "open", "limit": 100}
+    )
     updated_pull = developer.call(
         "forgejo_update_pull_request",
         {
@@ -779,11 +834,35 @@ def run_mcp_flow(mcp_tokens: dict[str, str]) -> None:
     )
     assert windowed_diff["files_included"] == ["src/greeting.py"]
     assert windowed_diff["files_missing"] == ["missing.txt"]
+    # Contract: `sha256` and `total_size` identify the WHOLE upstream diff, never the
+    # filtered payload nor the returned window. That stable identity is what lets a
+    # caller page without silently straddling two revisions of the source document.
     assert windowed_diff["sha256"] == diff["sha256"]
     assert windowed_diff["total_size"] == diff["total_size"]
-    assert windowed_diff["size"] < diff["size"]
+    assert windowed_diff["size"] < diff["size"], "`size` measures the path-filtered diff"
     assert "src/greeting.py" in windowed_diff["content"]
     assert "tests/test_greeting.py" not in windowed_diff["content"]
+
+    # `max_bytes` must cut, and `offset` must resume exactly where the cut stopped.
+    head = developer.call(
+        "forgejo_get_pull_request_diff",
+        {**repository, "number": pull["number"], "max_bytes": 64, "offset": 0},
+    )
+    assert head["truncated"] is True, "`max_bytes` was ignored"
+    assert 0 < head["returned_bytes"] <= 64 < diff["total_size"]
+    assert head["sha256"] == diff["sha256"] and head["total_size"] == diff["total_size"]
+    assert diff["content"].startswith(head["content"])
+    rest = developer.call(
+        "forgejo_get_pull_request_diff",
+        {
+            **repository,
+            "number": pull["number"],
+            "max_bytes": 64,
+            "offset": head["returned_bytes"],
+        },
+    )
+    assert rest["content"] != head["content"], "`offset` was ignored"
+    assert diff["content"].startswith(head["content"] + rest["content"]), "the windows must re-join"
     files = developer.call(
         "forgejo_get_pull_request_files",
         {**repository, "number": pull["number"]},
@@ -906,17 +985,75 @@ def run_mcp_flow(mcp_tokens: dict[str, str]) -> None:
     assert len(jobs["items"]) == 1
     job = jobs["items"][0]
     assert job["status"] == "success"
-    job_log = developer.call(
-        "forgejo_get_action_job_log",
-        {
-            **repository,
-            "job_id": job["id"],
-            "attempt": job["attempt"],
-        },
-    )
+    log_target = {**repository, "job_id": job["id"], "attempt": job["attempt"]}
+    job_log = developer.call("forgejo_get_action_job_log", log_target)
     assert "ok" in job_log["content"]
+    assert job_log["truncated"] is False, "the whole log is needed as the reference"
+    whole_log = job_log["content"]
+    assert "marker-unique" in whole_log and "marker-repeat" in whole_log
+    assert "\x1b[" in whole_log, "positive control: the raw log really carries ANSI noise"
+    assert "filtered_size" not in job_log, "no grep, no match-set size to pay for"
+
+    # `from_end` must select a different end of the log, and `offset` must resume the cut.
+    tail = developer.call("forgejo_get_action_job_log", {**log_target, "max_bytes": 64})
+    head = developer.call(
+        "forgejo_get_action_job_log", {**log_target, "max_bytes": 64, "from_end": False}
+    )
+    assert tail["truncated"] is head["truncated"] is True, "`max_bytes` was ignored"
+    assert head["content"] != tail["content"], "`from_end` was ignored"
+    assert head["offset"] == 0 and tail["offset"] > 0
+    assert whole_log.startswith(head["content"]) and whole_log.endswith(tail["content"])
+    assert head["size"] == tail["size"] == job_log["size"], "`size` describes the whole raw log"
+    resumed = developer.call(
+        "forgejo_get_action_job_log",
+        {**log_target, "max_bytes": 64, "from_end": False, "offset": head["returned_bytes"]},
+    )
+    assert resumed["content"] != head["content"], "`offset` was ignored"
+    assert whole_log.startswith(head["content"] + resumed["content"]), "the windows must re-join"
+
+    # `grep` must exclude a line that is provably in the log, and report the match-set size.
+    matched = developer.call("forgejo_get_action_job_log", {**log_target, "grep": "marker-unique"})
+    assert "marker-unique" in matched["content"]
+    assert "marker-repeat" not in matched["content"], "`grep` was ignored"
+    assert matched["size"] == job_log["size"], "`size` still describes the raw log"
+    assert 0 < matched["filtered_size"] < matched["size"], "the match set must be a strict subset"
+    assert matched["returned_bytes"] == matched["filtered_size"]
+    assert matched["truncated"] is False
+
+    # `filter` must actually remove the noise the positive control just proved is there.
+    filtered = developer.call("forgejo_get_action_job_log", {**log_target, "filter": "ci"})
+    assert "filter_stats" not in job_log, "`filter=none` is the default and declares nothing"
+    assert filtered["filter_stats"]["removed_ansi"] > 0, "`filter` was ignored"
+    assert "\x1b[" not in filtered["content"]
+    assert "marker-ansi" in filtered["content"], "the filter strips noise, not content"
+    assert filtered["size"] == job_log["size"], "filtering never rewrites the raw-log digest"
+    assert filtered["sha256"] == job_log["sha256"]
+
+    # `include_content=False` is the default: the answer must say so rather than look empty.
     run_logs = developer.call("forgejo_get_action_run_logs", {**repository, "run_id": run_id})
     assert run_logs["files"]
+    assert run_logs["content_included"] is False, "an index-only answer must declare itself"
+    assert all("content" not in entry for entry in run_logs["files"])
+    with_content = developer.call(
+        "forgejo_get_action_run_logs",
+        {**repository, "run_id": run_id, "include_content": True},
+    )
+    assert "content_included" not in with_content, "nothing omitted, nothing to announce"
+    assert [entry["name"] for entry in with_content["files"]] == [
+        entry["name"] for entry in run_logs["files"]
+    ]
+    assert any("ok" in entry["content"] for entry in with_content["files"])
+    assert all(entry["truncated"] is False for entry in with_content["files"])
+    bounded = developer.call(
+        "forgejo_get_action_run_logs",
+        {**repository, "run_id": run_id, "include_content": True, "max_bytes_per_file": 32},
+    )
+    assert any(entry["truncated"] for entry in bounded["files"]), "`max_bytes_per_file` was ignored"
+    assert all(entry["returned_bytes"] <= 32 for entry in bounded["files"])
+    for whole_entry, cut_entry in zip(with_content["files"], bounded["files"], strict=True):
+        assert cut_entry["sha256"] == whole_entry["sha256"], "the digest covers the raw file"
+        assert whole_entry["content"].endswith(cut_entry["content"])
+    print("PASS MCP Actions log window, grep, filter, and content-inclusion contract")
     artifacts = developer.call(
         "forgejo_list_action_run_artifacts",
         {**repository, "run_id": run_id, "limit": 30},
