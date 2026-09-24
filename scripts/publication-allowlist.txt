@@ -1,0 +1,13 @@
+# Reviewed exemptions for scripts/scrub-check.py
+#
+# Format:  rule_id | path glob | reason
+#
+# An entry waives one rule for one path. Keep the path as narrow as the finding and
+# write the reason for a reader who was not there: an exemption nobody can re-judge is
+# indistinguishable from a silenced gate.
+#
+# Do not quote the offending value in a reason. This file is scanned like any other,
+# so a reason that reproduces its finding creates the next one.
+
+url_credentials | docs/security/external-audit-2026-09-02.md | Dated audit record. Its credential-shaped strings are the redaction function's own test vectors: they document which inputs the redactor neutralizes, and the tokens in them are placeholder words, not issued credentials.
+private_ipv4 | docs/security/external-audit-2026-09-02.md | Same record. The RFC 1918 address appears inside one of those redaction test vectors; it names no host on the author's network.

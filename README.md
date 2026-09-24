@@ -177,6 +177,29 @@ Launch the 16.0.2 reference and the minimum supported 16.0.3 release to reproduc
 
 The integration and full-stack suites negotiate MCP Streamable HTTP protocol version `2025-06-18` explicitly.
 
+### Publishing
+
+This repository is developed against a private Forgejo instance and published to a
+public remote. Before commits cross that line, check them for deployment secrets and
+private infrastructure:
+
+```bash
+scripts/scrub-check.py --range <already-published>..HEAD
+```
+
+The gate validates every rule against a positive witness before each scan and aborts
+if one stays silent, so a reported "no finding" is never the silence of a broken
+pattern. A finding reports the rule, the path, the line and the length of the match,
+and never the match itself. Reviewed exceptions live in
+`scripts/publication-allowlist.txt`, one rule and one path per entry, each with the
+reason a later reader needs to re-judge it.
+
+Run it automatically on every push to the public remote:
+
+```bash
+git config core.hooksPath scripts/git-hooks
+```
+
 ## License
 
 Copyright holders license this project under the [Apache License 2.0](LICENSE).
