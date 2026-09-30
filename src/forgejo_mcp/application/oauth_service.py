@@ -68,6 +68,14 @@ _PKCE_PATTERN = re.compile(r"[A-Za-z0-9_-]{43,128}\Z")
 _REFRESH_RECOVERY_CACHE_MAX_ENTRIES = 1024
 
 
+class ConsentUnavailable(ValueError):
+    """A safe, stable reason for guidance to an authenticated consent user."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class StoredAuthorizationCode(AuthorizationCode):
     record_id: uuid.UUID
     client_record_id: uuid.UUID
@@ -244,6 +252,30 @@ class OAuthService(
                 default_grant_ttl_days=self.settings.oauth_refresh_token_ttl_days,
             )
 
+    async def consent_readiness(self, user_id: uuid.UUID) -> str | None:
+        async with self.session_factory_provider()() as session:
+            try:
+                await self._require_consent_ready(session, user_id)
+            except ConsentUnavailable as error:
+                return error.reason
+        return None
+
+    async def _require_consent_ready(self, session: AsyncSession, user_id: uuid.UUID) -> None:
+        user = await session.get(User, user_id)
+        if user is None or user.status != RecordStatus.ACTIVE:
+            raise ConsentUnavailable("user_unavailable")
+        credential = await session.scalar(
+            select(ForgejoCredential.id).where(
+                ForgejoCredential.user_id == user_id,
+                ForgejoCredential.status == CredentialStatus.ACTIVE,
+                ForgejoCredential.revoked_at.is_(None),
+            )
+        )
+        if credential is None:
+            raise ConsentUnavailable("credential_required")
+        if not await self._effective_tool_names(session, user_id):
+            raise ConsentUnavailable("tools_required")
+
     async def resolve_consent(
         self,
         *,
@@ -253,7 +285,7 @@ class OAuthService(
         grant_ttl_days: int | None = None,
     ) -> str:
         if not _valid_interaction_format(interaction):
-            raise ValueError("authorization request is invalid or expired")
+            raise ConsentUnavailable("request_expired")
         now = datetime.now(UTC)
         async with self.session_factory_provider()() as session:
             record = await session.scalar(
@@ -262,7 +294,7 @@ class OAuthService(
                 .with_for_update()
             )
             if not _pending_request(record, now):
-                raise ValueError("authorization request is invalid or expired")
+                raise ConsentUnavailable("request_expired")
             assert record is not None
             account = await session.get(Account, account_id)
             if (
@@ -272,10 +304,10 @@ class OAuthService(
                 or account.status != RecordStatus.ACTIVE
                 or account.must_change_password
             ):
-                raise ValueError("a ready user account is required")
+                raise ConsentUnavailable("account_required")
             client = await session.get(OAuthClient, record.client_id)
             if client is None:
-                raise ValueError("OAuth client is unavailable")
+                raise ConsentUnavailable("client_unavailable")
 
             selected_grant_ttl_days = (
                 self._validate_grant_ttl_days(grant_ttl_days) if approve else None
@@ -298,7 +330,7 @@ class OAuthService(
                     iss=self.issuer_url,
                 )
 
-            await self._require_authorizable_user(session, account.user_id)
+            await self._require_consent_ready(session, account.user_id)
             assert selected_grant_ttl_days is not None
             refresh_expires_at = now + timedelta(days=selected_grant_ttl_days)
             code = new_oauth_code()

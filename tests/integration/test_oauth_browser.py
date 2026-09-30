@@ -112,7 +112,28 @@ def test_consent_cross_origin_callback_in_chromium(action):
                 )
                 try:
                     page = browser.new_page()
+                    page.goto(issuer)
+                    # Wait for the React auth lookup/loading shell to settle.
+                    page.get_by_role("heading", name="Sign in", exact=True).wait_for()
+                    dashboard_color = page.locator(".shell").evaluate(
+                        "element => getComputedStyle(element).backgroundColor"
+                    )
+                    dashboard_card = page.locator(".authCard").evaluate(
+                        "element => getComputedStyle(element).borderRadius"
+                    )
                     page.goto(f"{issuer}/authorize?{urlencode(params)}")
+                    assert (
+                        page.locator(".shell").evaluate(
+                            "element => getComputedStyle(element).backgroundColor"
+                        )
+                        == dashboard_color
+                    )
+                    assert (
+                        page.locator(".authCard").evaluate(
+                            "element => getComputedStyle(element).borderRadius"
+                        )
+                        == dashboard_card
+                    )
                     page.locator('input[name="username"]').fill("oauth-user")
                     page.locator('input[name="password"]').fill("user-password-for-testing")
                     with page.expect_response(lambda r: r.url.endswith("/oauth/login")) as login:

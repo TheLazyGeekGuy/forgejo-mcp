@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hmac
+import logging
 import secrets
 import time
 from html import escape
+from importlib.resources import files
 from typing import Any, cast
 from urllib.parse import urlsplit
 
@@ -25,7 +27,7 @@ from starlette.types import ASGIApp
 from forgejo_mcp.api.auth import set_auth_cookies
 from forgejo_mcp.application.auth_service import AuthService
 from forgejo_mcp.application.errors import AuthenticationFailed
-from forgejo_mcp.application.oauth_service import OAUTH_SCOPE, OAuthService
+from forgejo_mcp.application.oauth_service import OAUTH_SCOPE, ConsentUnavailable, OAuthService
 from forgejo_mcp.auth.client_ip import get_client_ip
 from forgejo_mcp.auth.oauth_rate_limit import LoginRateLimiter, MultiScopeRateLimiter
 from forgejo_mcp.auth.passwords import normalize_username
@@ -36,6 +38,7 @@ from forgejo_mcp.db.models import AccountRole, RecordStatus
 
 OAUTH_CSRF_COOKIE = "fmcp_oauth_csrf"
 _oauth_login_limiter = LoginRateLimiter()
+logger = logging.getLogger(__name__)
 
 
 def create_oauth_routes(service: OAuthService, settings: Settings) -> list[Route]:
@@ -172,10 +175,7 @@ def create_oauth_routes(service: OAuthService, settings: Settings) -> list[Route
         interaction = request.query_params.get("request", "")
         details = await service.consent_details(interaction)
         if details is None:
-            return _oauth_html(
-                _message_page("Authorization request unavailable", "Start the connection again."),
-                status_code=400,
-            )
+            return _consent_guidance("request_expired")
         current = None
         session_token = request.cookies.get("fmcp_session")
         if session_token:
@@ -193,16 +193,13 @@ def create_oauth_routes(service: OAuthService, settings: Settings) -> list[Route
             or current.account.must_change_password
             or current.account.status != RecordStatus.ACTIVE
         ):
-            response = _oauth_html(
-                _message_page(
-                    "User account required",
-                    "Sign out of the Dashboard and sign in with the Forgejo MCP user account.",
-                ),
-                status_code=403,
-            )
+            response = _consent_guidance("account_required", status_code=403)
         else:
+            readiness = await service.consent_readiness(current.account.user_id)
             csrf = request.cookies.get(CSRF_COOKIE)
-            if csrf is None:
+            if readiness is not None:
+                response = _consent_guidance(readiness, status_code=403)
+            elif csrf is None:
                 response = _oauth_html(
                     _message_page(
                         "Session unavailable",
@@ -252,10 +249,7 @@ def create_oauth_routes(service: OAuthService, settings: Settings) -> list[Route
         if not csrf_cookie or not csrf or not hmac.compare_digest(csrf_cookie, csrf):
             return _oauth_html(_message_page("Request rejected", "CSRF validation failed."), 403)
         if not interaction or await service.consent_details(interaction) is None:
-            return _oauth_html(
-                _message_page("Authorization request unavailable", "Start the connection again."),
-                400,
-            )
+            return _consent_guidance("request_expired")
         client_ip = get_client_ip(request, settings)
         rate_limit_key = f"{client_ip}:{normalize_username(username)}"
         lease = _oauth_login_limiter.check(rate_limit_key)
@@ -282,13 +276,7 @@ def create_oauth_routes(service: OAuthService, settings: Settings) -> list[Route
                 or result.account.must_change_password
             ):
                 await auth.logout(result.session)
-                return _oauth_html(
-                    _message_page(
-                        "User account required",
-                        "Use the Forgejo MCP user account, not the administrator account.",
-                    ),
-                    403,
-                )
+                return _consent_guidance("account_required", status_code=403)
         response = RedirectResponse(
             f"/oauth/consent?request={interaction}",
             status_code=303,
@@ -338,9 +326,20 @@ def create_oauth_routes(service: OAuthService, settings: Settings) -> list[Route
                     approve=action == "approve",
                     grant_ttl_days=grant_ttl_days,
                 )
-            except (ValueError, RegistrationError, TokenError):
+            except ConsentUnavailable as error:
+                return _consent_guidance(error.reason)
+            except (ValueError, RegistrationError, TokenError) as error:
+                # Do not render SDK descriptions, request values or secrets.
+                logger.warning(
+                    "oauth_consent_rejected",
+                    extra={"reason": "invalid_consent", "error_type": type(error).__name__},
+                )
                 return _oauth_html(
-                    _message_page("Authorization failed", "Start the connection again."),
+                    _message_page(
+                        "Authorization could not be completed",
+                        "Choose one of the offered authorization durations. If the request is "
+                        "no longer available, start a new connection from your MCP client.",
+                    ),
                     400,
                 )
         response = RedirectResponse(target, status_code=302)
@@ -442,7 +441,7 @@ def _oauth_html(content: str, status_code: int = 200) -> HTMLResponse:
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<title>Forgejo MCP authorization</title>"
         "<link rel='stylesheet' href='/oauth/styles.css'></head>"
-        f"<body><main>{content}</main></body></html>",
+        f"<body><main class='shell'>{content}</main></body></html>",
         status_code=status_code,
         headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
     )
@@ -455,20 +454,28 @@ def _login_page(
     *,
     login_failed: bool = False,
 ) -> str:
-    error = "<p class='error'>Invalid username or password.</p>" if login_failed else ""
+    error = (
+        "<p class='error' role='alert'>Invalid username or password. "
+        "Use your Dashboard user account, not your Forgejo password.</p>"
+        if login_failed
+        else ""
+    )
     return (
-        "<section><p class='eyebrow'>Forgejo MCP</p><h1>Sign in to authorize</h1>"
-        f"<p><strong>{escape(client_name)}</strong> is requesting access.</p>{error}"
-        "<form method='post' action='/oauth/login'>"
+        "<section class='card authCard'><p class='eyebrow'>Forgejo MCP · Secure authorization</p>"
+        "<h1>Sign in to authorize</h1>"
+        f"<p class='description'><strong>{escape(client_name)}</strong> is requesting access.</p>"
+        "<form class='form' method='post' action='/oauth/login'>"
         f"<input type='hidden' name='request' value='{escape(interaction)}'>"
         f"<input type='hidden' name='csrf' value='{escape(csrf)}'>"
         "<label>Dashboard username<input name='username' autocomplete='username' "
         "required maxlength='64'></label>"
         "<label>Password<input name='password' type='password' "
         "autocomplete='current-password' required maxlength='1024'></label>"
-        "<button type='submit'>Sign in</button></form>"
-        "<p class='hint'>Use the user account linked to your Forgejo identity, not an "
-        "administrator account.</p></section>"
+        f"{error}<button type='submit'>Sign in</button></form>"
+        "<p class='description'>Use the Dashboard user account linked to your Forgejo identity, "
+        "not an administrator account. First accept your invitation, verify your Forgejo PAT "
+        "in the Dashboard, and ask your administrator to enable your tools.</p>"
+        "<p><a href='/'>Open Dashboard</a></p></section>"
     )
 
 
@@ -492,15 +499,16 @@ def _consent_page(
         for days in grant_ttl_options_days
     )
     return (
-        "<section><p class='eyebrow'>Forgejo MCP</p><h1>Authorize MCP access?</h1>"
-        f"<p><strong>{escape(client_name)}</strong> wants to connect as "
+        "<section class='card authCard'><p class='eyebrow'>Forgejo MCP · Secure authorization</p>"
+        "<h1>Authorize MCP access?</h1>"
+        f"<p class='description'><strong>{escape(client_name)}</strong> wants to connect as "
         f"<strong>{escape(username)}</strong>.</p>"
-        "<dl>"
+        "<dl class='oauthDetails credentialSummary'>"
         f"<dt>Client</dt><dd>{escape(client_id)}</dd>"
         f"<dt>Callback</dt><dd>{escape(redirect_uri)}</dd>"
         "<dt>Permission boundary</dt><dd>Only tools already enabled and allowed for "
         "this account. OAuth cannot add permissions.</dd></dl>"
-        "<form method='post' action='/oauth/consent'>"
+        "<form class='form' method='post' action='/oauth/consent'>"
         f"<input type='hidden' name='request' value='{escape(interaction)}'>"
         f"<input type='hidden' name='csrf' value='{escape(csrf)}'>"
         "<label>Authorization duration"
@@ -508,38 +516,75 @@ def _consent_page(
         "<div class='actions'><button type='submit' name='action' "
         "value='approve'>Authorize</button>"
         "<button class='secondary' type='submit' name='action' value='deny'>Deny</button>"
-        "</div></form><p class='hint'>Access tokens expire after one hour and are refreshed "
-        "automatically until the selected authorization expiry. You can revoke access at any "
-        "time.</p></section>"
+        "</div></form><p class='description'>Short-lived access tokens are refreshed "
+        "automatically until the selected authorization expiry. You can revoke this connection "
+        "in the Dashboard's MCP tokens section at any time. Deny returns to your MCP client "
+        "without granting access.</p></section>"
     )
 
 
 def _message_page(title: str, message: str) -> str:
     return (
-        "<section><p class='eyebrow'>Forgejo MCP</p>"
-        f"<h1>{escape(title)}</h1><p>{escape(message)}</p>"
-        "<p><a href='/'>Return to the Dashboard</a></p></section>"
+        "<section class='card authCard'><p class='eyebrow'>Forgejo MCP · Secure authorization</p>"
+        f"<h1>{escape(title)}</h1><p class='description' role='alert'>{escape(message)}</p>"
+        "<p><a href='/'>Return to the Dashboard</a></p>"
+        "<p class='description'>After completing setup, return to your MCP client and start "
+        "authorization again. In Pi, run <code>/mcp-auth forgejo-local-oauth</code> for the "
+        "local test connection, or <code>/mcp-auth &lt;server-name&gt;</code> "
+        "for another connection. "
+        "Do not reuse an expired authorization link.</p></section>"
     )
 
 
-_OAUTH_CSS = """
-:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
-body { margin: 0; min-height: 100vh; display: grid; place-items: center;
-  background: #111; color: #f5f5f5; }
-main { width: min(92vw, 34rem); }
-section { border: 1px solid #3b3b3b; border-radius: 1rem; padding: 2rem; background: #1b1b1b; }
-h1 { margin: .25rem 0 1rem; font-size: 1.75rem; }
-.eyebrow { color: #a8d5a2; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
-label { display: grid; gap: .4rem; margin: 1rem 0; }
-input, select { border: 1px solid #555; border-radius: .5rem; padding: .75rem;
-  background: #111; color: inherit; }
-button { border: 0; border-radius: .5rem; padding: .75rem 1rem;
-  background: #62a85a; color: #071006; font-weight: 700; cursor: pointer; }
-button.secondary { background: #3b3b3b; color: #fff; }
-.actions { display: flex; gap: .75rem; margin-top: 1.5rem; }
-dl { display: grid; grid-template-columns: 7rem 1fr; gap: .6rem; overflow-wrap: anywhere; }
-dt { color: #aaa; } dd { margin: 0; }
-.hint { color: #aaa; font-size: .9rem; }
-.error { color: #ff9898; }
-a { color: #a8d5a2; }
-""".strip()
+def _consent_guidance(reason: str, status_code: int = 400) -> HTMLResponse:
+    guidance = {
+        "credential_required": (
+            "Set up your Forgejo credential",
+            "Your Dashboard account does not have an active, verified Forgejo PAT. "
+            "Open the Dashboard as this user, submit and verify your PAT in the Forgejo "
+            "credential section, then restart authorization. Never paste your PAT into Pi chat.",
+        ),
+        "tools_required": (
+            "Tool access is required",
+            "No enabled tools are currently allowed for your user. Ask your administrator "
+            "to enable the required tools globally and grant your user a tool allowance, "
+            "then restart authorization. OAuth cannot add permissions.",
+        ),
+        "account_required": (
+            "Use a ready user account",
+            "Administrator accounts cannot authorize MCP access. Sign out of the Dashboard "
+            "and sign in with your invited user account. Complete invitation acceptance and "
+            "any required password change first. Contact your administrator if it is disabled.",
+        ),
+        "user_unavailable": (
+            "User account unavailable",
+            "Your linked user account is not active. Ask your administrator to check its "
+            "status before restarting authorization.",
+        ),
+        "request_expired": (
+            "Authorization request unavailable",
+            "This request is expired, already used, or invalid. Return to your MCP client "
+            "and start a new authorization request. Refreshing this page does not renew it.",
+        ),
+        "client_unavailable": (
+            "MCP client unavailable",
+            "This client's registration is no longer available. Reconnect or register the "
+            "MCP client again before starting authorization.",
+        ),
+    }
+    title, message = guidance.get(
+        reason,
+        (
+            "Authorization could not be completed",
+            "Return to the Dashboard to check your user setup, "
+            "then start a new authorization request.",
+        ),
+    )
+    logger.warning(
+        "oauth_consent_rejected", extra={"reason": reason if reason in guidance else "unknown"}
+    )
+    return _oauth_html(_message_page(title, message), status_code)
+
+
+# One stylesheet is packaged for both the Vite Dashboard and backend OAuth pages.
+_OAUTH_CSS = files("forgejo_mcp").joinpath("static/dashboard.css").read_text(encoding="utf-8")

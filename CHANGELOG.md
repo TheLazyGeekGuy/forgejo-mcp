@@ -20,6 +20,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 - Preserve MCP sessions across OAuth refresh using grant-family identity and per-message token authorization/auditing.
 - Reject compressed CIMD documents before decompression and bound raw response buffering.
 - Accept public-client revocation requests without `client_secret`.
+- Share Dashboard styling with OAuth pages and explain missing PATs, missing tool allowances, user-account requirements and expired requests before granting consent.
 - Preserve omitted authorization redirect URIs through code exchange (migration 0013); add PostgreSQL and Chromium regression coverage.
 
 ## [0.2.0] - 2026-09-09
