@@ -989,14 +989,18 @@ def test_cimd_client_metadata_is_fetched_without_redirects_and_persisted() -> No
             return httpx.Response(
                 200,
                 headers={"content-type": "application/json"},
-                json={
-                    "client_id": client_id,
-                    "client_name": "Anthropic Claude",
-                    "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
-                    "token_endpoint_auth_method": "none",
-                    "grant_types": ["authorization_code", "refresh_token"],
-                    "response_types": ["code"],
-                },
+                stream=httpx.ByteStream(
+                    json.dumps(
+                        {
+                            "client_id": client_id,
+                            "client_name": "Anthropic Claude",
+                            "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"],
+                            "token_endpoint_auth_method": "none",
+                            "grant_types": ["authorization_code", "refresh_token"],
+                            "response_types": ["code"],
+                        }
+                    ).encode()
+                ),
             )
 
         service = OAuthService(

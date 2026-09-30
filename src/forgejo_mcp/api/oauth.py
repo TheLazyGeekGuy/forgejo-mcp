@@ -9,10 +9,10 @@ from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 from mcp.server.auth.handlers.authorize import AuthorizationHandler
-from mcp.server.auth.handlers.revoke import RevocationHandler
+from mcp.server.auth.handlers.revoke import RevocationRequest
 from mcp.server.auth.handlers.token import TokenHandler
 from mcp.server.auth.json_response import PydanticJSONResponse
-from mcp.server.auth.middleware.client_auth import ClientAuthenticator
+from mcp.server.auth.middleware.client_auth import AuthenticationError, ClientAuthenticator
 from mcp.server.auth.provider import RegistrationError, TokenError
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata
 from pydantic import ValidationError
@@ -28,6 +28,7 @@ from forgejo_mcp.application.errors import AuthenticationFailed
 from forgejo_mcp.application.oauth_service import OAUTH_SCOPE, OAuthService
 from forgejo_mcp.auth.client_ip import get_client_ip
 from forgejo_mcp.auth.oauth_rate_limit import LoginRateLimiter, MultiScopeRateLimiter
+from forgejo_mcp.auth.passwords import normalize_username
 from forgejo_mcp.auth.session import CSRF_COOKIE, get_current_session
 from forgejo_mcp.auth.tokens import hash_token, new_token
 from forgejo_mcp.config import Settings, normalize_http_origin
@@ -126,6 +127,47 @@ def create_oauth_routes(service: OAuthService, settings: Settings) -> list[Route
             return _token_error("resource must identify this MCP server")
         return cast(Response, await token_handler.handle(request))
 
+    async def revoke(request: Request) -> Response:
+        # SDK 1.28's RevocationRequest makes the nullable client_secret field
+        # required. Supply its missing default for public clients, without
+        # weakening client authentication or token ownership checks.
+        try:
+            client = await client_authenticator.authenticate_request(request)
+        except AuthenticationError as error:
+            return JSONResponse(
+                {"error": "unauthorized_client", "error_description": error.message},
+                status_code=401,
+                headers={"Cache-Control": "no-store"},
+            )
+        try:
+            payload: dict[str, Any] = dict(await request.form())
+            payload.setdefault("client_secret", None)
+            revocation = RevocationRequest.model_validate(payload)
+        except ValidationError:
+            return JSONResponse(
+                {"error": "invalid_request", "error_description": "invalid revocation request"},
+                status_code=400,
+                headers={"Cache-Control": "no-store"},
+            )
+        # A hint changes lookup order only; it must not prevent revocation of
+        # an otherwise valid token of the other type (RFC 7009).
+        kinds = ["access_token", "refresh_token"]
+        if revocation.token_type_hint == "refresh_token":
+            kinds.reverse()
+        for kind in kinds:
+            stored = (
+                await service.load_access_token(revocation.token)
+                if kind == "access_token"
+                else await service.load_refresh_token(client, revocation.token)
+            )
+            if stored is not None:
+                if stored.client_id == client.client_id:
+                    await service.revoke_token(stored)
+                break
+        return Response(
+            status_code=200, headers={"Cache-Control": "no-store", "Pragma": "no-cache"}
+        )
+
     async def consent_page(request: Request) -> Response:
         interaction = request.query_params.get("request", "")
         details = await service.consent_details(interaction)
@@ -169,6 +211,12 @@ def create_oauth_routes(service: OAuthService, settings: Settings) -> list[Route
                     status_code=401,
                 )
             else:
+                # Only the persisted, registration-validated callback may
+                # widen this page's form-action for the post-consent redirect.
+                callback = urlsplit(details.redirect_uri)
+                request.state.oauth_consent_callback_origin = normalize_http_origin(
+                    f"{callback.scheme}://{callback.netloc}"
+                )
                 response = _oauth_html(
                     _consent_page(
                         interaction=interaction,
@@ -209,7 +257,7 @@ def create_oauth_routes(service: OAuthService, settings: Settings) -> list[Route
                 400,
             )
         client_ip = get_client_ip(request, settings)
-        rate_limit_key = f"{client_ip}:{username.casefold()}"
+        rate_limit_key = f"{client_ip}:{normalize_username(username)}"
         lease = _oauth_login_limiter.check(rate_limit_key)
         async with request.app.state.db_session_factory() as session:
             auth = AuthService(session)
@@ -331,10 +379,7 @@ def create_oauth_routes(service: OAuthService, settings: Settings) -> list[Route
         ),
         Route(
             "/revoke",
-            endpoint=_cors(
-                RevocationHandler(service, client_authenticator).handle,
-                ["POST", "OPTIONS"],
-            ),
+            endpoint=_cors(revoke, ["POST", "OPTIONS"]),
             methods=["POST", "OPTIONS"],
         ),
         Route("/oauth/consent", endpoint=consent_page, methods=["GET"]),

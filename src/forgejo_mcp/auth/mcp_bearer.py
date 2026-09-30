@@ -31,6 +31,7 @@ class AuthenticatedMcpToken:
     scopes: tuple[str, ...] = ()
     resource: str | None = None
     issuer: str | None = None
+    family_id: uuid.UUID | None = None
 
 
 def valid_mcp_token_format(token: str) -> bool:
@@ -71,6 +72,7 @@ class McpBearerAuthenticator:
         scopes: tuple[str, ...] = ()
         resource = None
         issuer = None
+        family_id = None
         if record.kind == "oauth":
             if (
                 oauth_link is None
@@ -89,6 +91,7 @@ class McpBearerAuthenticator:
             scopes = tuple(refresh.scopes)
             resource = oauth_link.resource
             issuer = oauth_issuer_url
+            family_id = family.id
         elif record.kind != "static" or oauth_link is not None:
             # Fail closed on unknown or internally inconsistent token records.
             return None
@@ -118,6 +121,7 @@ class McpBearerAuthenticator:
             scopes=scopes,
             resource=resource,
             issuer=issuer,
+            family_id=family_id,
         )
 
 
@@ -146,7 +150,13 @@ class ForgejoMcpTokenVerifier:
             return None
         return AccessToken(
             token="",
-            client_id=str(authenticated.token_id),
+            # The SDK binds HTTP sessions to this identity. Rotation must not
+            # change it, but independently consented grants must remain isolated.
+            client_id=(
+                f"oauth-family:{authenticated.family_id}"
+                if authenticated.family_id is not None
+                else str(authenticated.token_id)
+            ),
             scopes=list(authenticated.scopes),
             expires_at=(
                 int(authenticated.expires_at.timestamp())
@@ -172,7 +182,10 @@ def _active(record: McpToken, now: datetime) -> bool:
 
 
 def token_id_from_access_token(access_token: AccessToken) -> uuid.UUID:
-    return uuid.UUID(access_token.client_id)
+    token_id = (access_token.claims or {}).get("mcp_token_id")
+    if not isinstance(token_id, str):
+        raise ValueError("authenticated MCP token has no token ID claim")
+    return uuid.UUID(token_id)
 
 
 def user_id_from_access_token(access_token: AccessToken) -> uuid.UUID:

@@ -7,7 +7,11 @@ from typing import Any, cast
 
 import jsonschema
 from mcp.server.auth.middleware.auth_context import AuthContextMiddleware, get_access_token
-from mcp.server.auth.middleware.bearer_auth import BearerAuthBackend, RequireAuthMiddleware
+from mcp.server.auth.middleware.bearer_auth import (
+    AuthenticatedUser,
+    BearerAuthBackend,
+    RequireAuthMiddleware,
+)
 from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.routes import build_resource_metadata_url
 from mcp.server.lowlevel import Server
@@ -18,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.middleware import Middleware
 from starlette.middleware.authentication import AuthenticationMiddleware
 from starlette.middleware.cors import CORSMiddleware
+from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -75,6 +80,8 @@ class McpHttpApplication:
             [
                 (
                     "token",
+                    # Stable across OAuth rotation, so refreshing cannot reset
+                    # the grant's rate-limit budget. Static IDs are unchanged.
                     access_token.client_id,
                     self.settings.mcp_token_rate_limit_requests,
                 ),
@@ -133,7 +140,7 @@ def build_mcp_runtime(
 
     @server.list_tools()  # type: ignore[no-untyped-call,untyped-decorator]
     async def handle_list_tools() -> list[Tool]:
-        access_token = _access_token()
+        access_token = _access_token(server)
         token_id = token_id_from_access_token(access_token)
         visible: list[Tool] = []
         async with session_factory_provider()() as session:
@@ -166,7 +173,7 @@ def build_mcp_runtime(
         outcome = "failed"
         spec = get_tool(name)
         metric_tool = spec.name if spec is not None else "__unknown__"
-        access_token = _access_token()
+        access_token = _access_token(server)
         token_id = token_id_from_access_token(access_token)
         user_id = user_id_from_access_token(access_token)
         user_context = set_user_id(str(user_id))
@@ -280,7 +287,15 @@ def build_mcp_runtime(
     return McpRuntime(server=server, manager=manager, route=route)
 
 
-def _access_token() -> AccessToken:
+def _access_token(server: Server[Any, Any] | None = None) -> AccessToken:
+    if server is not None:
+        # The session task inherits the initialize request's ContextVars. After
+        # refresh that token is revoked; use the authenticated HTTP request
+        # carried by this message instead, never a cached session credential.
+        request = server.request_context.request
+        if isinstance(request, Request) and isinstance(request.user, AuthenticatedUser):
+            return request.user.access_token
+        raise RuntimeError("MCP request authentication context is unavailable")
     access_token = get_access_token()
     if access_token is None:
         raise RuntimeError("MCP authentication context is unavailable")

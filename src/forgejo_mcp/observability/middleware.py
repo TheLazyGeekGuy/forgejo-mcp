@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -136,13 +137,36 @@ class SecurityHeadersMiddleware:
                 headers = list(message.get("headers", []))
                 _set_header(headers, b"x-content-type-options", b"nosniff")
                 _set_header(headers, b"x-frame-options", b"DENY")
-                _set_header(headers, b"referrer-policy", b"no-referrer")
+                # Chromium derives an opaque Origin for form POSTs under
+                # no-referrer. Keep the same-origin CSRF check working without
+                # leaking the interaction URL to the external callback.
+                referrer_policy = (
+                    b"same-origin" if path in {"/oauth/consent", "/oauth/login"} else b"no-referrer"
+                )
+                _set_header(headers, b"referrer-policy", referrer_policy)
+                form_action = "'self'"
+                callback_origin = scope.get("state", {}).get("oauth_consent_callback_origin")
+                if (
+                    path == "/oauth/consent"
+                    and scope.get("method") == "GET"
+                    and message["status"] == 200
+                    and isinstance(callback_origin, str)
+                    # Defense in depth: a callback host must not inject CSP
+                    # directives, wildcard sources, or header delimiters.
+                    and re.fullmatch(
+                        r"https?://(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\])(?::[0-9]+)?",
+                        callback_origin,
+                    )
+                ):
+                    form_action += f" {callback_origin}"
                 _set_header(
                     headers,
                     b"content-security-policy",
-                    b"default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
-                    b"form-action 'self'; object-src 'none'; script-src 'self'; "
-                    b"style-src 'self'; img-src 'self' data:; connect-src 'self'",
+                    (
+                        "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
+                        f"form-action {form_action}; object-src 'none'; script-src 'self'; "
+                        "style-src 'self'; img-src 'self' data:; connect-src 'self'"
+                    ).encode("ascii"),
                 )
                 if (
                     path == "/mcp"

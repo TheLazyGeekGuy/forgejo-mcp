@@ -14,6 +14,14 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 - Transactional family revocation, historical backfill and PostgreSQL concurrency/lifecycle tests; see `docs/security/oauth-upgrade.md` before applying migrations 0009–0012.
 - Claude/OpenAI edge troubleshooting covering discovery, registration, token exchange and Cloudflare bot challenges.
 
+### Fixed
+
+- Allow registered OAuth callbacks through consent-page CSP while retaining browser Origin validation and cross-origin referrer privacy.
+- Preserve MCP sessions across OAuth refresh using grant-family identity and per-message token authorization/auditing.
+- Reject compressed CIMD documents before decompression and bound raw response buffering.
+- Accept public-client revocation requests without `client_secret`.
+- Preserve omitted authorization redirect URIs through code exchange (migration 0013); add PostgreSQL and Chromium regression coverage.
+
 ## [0.1.0] - 2026-09-08
 
 ### Compatibility

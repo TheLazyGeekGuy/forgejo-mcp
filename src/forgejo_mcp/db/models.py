@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -253,6 +254,9 @@ class OAuthAuthorizationRequest(Base):
         ForeignKey("oauth_clients.id", ondelete="CASCADE"), index=True
     )
     redirect_uri: Mapped[str] = mapped_column(String(2048))
+    redirect_uri_provided_explicitly: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true")
+    )
     state: Mapped[str | None] = mapped_column(String(1024))
     code_challenge: Mapped[str] = mapped_column(String(128))
     scopes: Mapped[list[str]] = mapped_column(JSON)
@@ -274,6 +278,9 @@ class OAuthAuthorizationCode(Base):
         ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     redirect_uri: Mapped[str] = mapped_column(String(2048))
+    redirect_uri_provided_explicitly: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("true")
+    )
     code_challenge: Mapped[str] = mapped_column(String(128))
     scopes: Mapped[list[str]] = mapped_column(JSON)
     resource: Mapped[str] = mapped_column(String(2048))

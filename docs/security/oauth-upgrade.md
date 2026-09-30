@@ -9,6 +9,9 @@ Stop all application workers, run `alembic upgrade head`, then restart the match
 application. Migrations 0009–0012 add OAuth records, absolute grant expiry and token
 families. 0012 also repairs historical Dashboard revocations on installations already
 at 0011 without interpreting healthy access-token rotation as family revocation.
+Migration 0013 records whether each authorization request explicitly supplied its
+redirect URI. Legacy requests/codes default to `true` to retain their strict
+exchange behavior; newly created requests preserve the actual presence flag.
 
 Configure an HTTPS issuer origin and resource equal to that origin plus `/mcp`.
 Register only required browser origins; CIMD metadata destinations are separately
@@ -36,6 +39,36 @@ tokens merely to undo a revocation.
 PostgreSQL CI covers full consent/PKCE/rotation, strict grace, disabled-user cache,
 missing-family failure, both concurrency regressions, and legacy/healthy backfill
 through real bearer/refresh services. Existing static-token lifecycle tests remain.
+
+OAuth HTTP sessions are bound to a grant family, not an individual access token.
+Refreshing preserves the session but each message uses the current HTTP request's
+token ID for authorization and audit. Independently consented grants cannot share
+sessions. Token-rate limits use the stable family identity so rotation cannot
+reset their budget. Upgrading restarts the process, so existing in-memory MCP
+sessions must be initialized again.
+
+Consent pages allow only their persisted callback origin in CSP `form-action`.
+OAuth forms use `Referrer-Policy: same-origin` so browser POSTs retain a verifiable
+Origin without disclosing the interaction URL to external callbacks. Other pages
+retain their default browser policy. Public clients may omit `client_secret` when
+revoking access or refresh tokens.
+
+CIMD servers must return uncompressed JSON. The fetcher requests `identity`, rejects
+other content encodings before reading them, and counts raw bytes before extending
+the bounded document buffer; it does not trust `Content-Length`.
+
+To run the Chromium approval/denial regression tests locally, provision a migrated,
+throwaway database (these integration tests reset its data), then run:
+
+```sh
+uv sync --frozen
+uv run playwright install chromium
+FMCP_TEST_BROWSER=1 FMCP_TEST_DATABASE_URL="$TEST_DATABASE_URL" \
+  uv run pytest tests/integration/test_oauth_browser.py
+```
+
+`FMCP_TEST_CHROMIUM_EXECUTABLE` can select an existing Chromium binary. CI installs
+Chromium and enables these tests alongside the PostgreSQL suite.
 
 This standalone PR includes the Origin, proxy-IP, throttling and log-redaction
 helpers required to expose OAuth safely. Those shared boundaries overlap the

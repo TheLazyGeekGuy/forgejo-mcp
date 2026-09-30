@@ -47,8 +47,15 @@ def test_consent_lifetime_choices_are_exactly_policy_bounded() -> None:
 
 
 async def fetch_cimd(response: httpx.Response):
-    async def handler(_request: httpx.Request) -> httpx.Response:
-        return response
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["accept-encoding"] == "identity"
+        # A real HTTP transport supplies an unread stream, not Response's
+        # eagerly consumed convenience content/json body.
+        return httpx.Response(
+            response.status_code,
+            headers=response.headers,
+            stream=httpx.ByteStream(response.content),
+        )
 
     service = OAuthService(
         lambda: None,  # type: ignore[arg-type]

@@ -203,6 +203,7 @@ class OAuthService(
                     request_token_hash=hash_token(interaction),
                     client_id=client_record.id,
                     redirect_uri=str(params.redirect_uri),
+                    redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly,
                     state=params.state,
                     code_challenge=params.code_challenge,
                     scopes=scopes,
@@ -307,6 +308,7 @@ class OAuthService(
                     client_id=client.id,
                     user_id=account.user_id,
                     redirect_uri=record.redirect_uri,
+                    redirect_uri_provided_explicitly=record.redirect_uri_provided_explicitly,
                     code_challenge=record.code_challenge,
                     scopes=record.scopes,
                     resource=record.resource,
@@ -361,7 +363,7 @@ class OAuthService(
                 client_id=client.client_id,
                 code_challenge=record.code_challenge,
                 redirect_uri=TypeAdapter(AnyUrl).validate_python(record.redirect_uri),
-                redirect_uri_provided_explicitly=True,
+                redirect_uri_provided_explicitly=record.redirect_uri_provided_explicitly,
                 resource=record.resource,
                 subject=str(record.user_id),
                 record_id=record.id,
@@ -877,19 +879,26 @@ class OAuthService(
                 client.stream(
                     "GET",
                     client_id,
-                    headers={"Accept": "application/json"},
+                    headers={"Accept": "application/json", "Accept-Encoding": "identity"},
                 ) as response,
             ):
                 if response.status_code != 200 or response.is_redirect:
                     metadata_error = "CIMD endpoint did not return HTTP 200"
                 elif "json" not in response.headers.get("content-type", "").lower():
                     metadata_error = "CIMD endpoint did not return JSON"
+                elif (
+                    response.headers.get("content-encoding", "identity").strip().lower()
+                    != "identity"
+                ):
+                    # Do not let HTTPX decompress a small compression bomb into
+                    # an unbounded allocation before we can check its size.
+                    metadata_error = "compressed CIMD documents are not supported"
                 else:
-                    async for chunk in response.aiter_bytes():
-                        body.extend(chunk)
-                        if len(body) > self.settings.oauth_client_metadata_max_bytes:
+                    async for chunk in response.aiter_raw():
+                        if len(body) + len(chunk) > self.settings.oauth_client_metadata_max_bytes:
                             metadata_error = "CIMD document is too large"
                             break
+                        body.extend(chunk)
         except httpx.HTTPError as error:
             raise RegistrationError(
                 "invalid_client_metadata",
