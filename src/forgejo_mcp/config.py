@@ -20,6 +20,7 @@ class Settings(BaseSettings):
 
     environment: Literal["development", "test", "production"] = "development"
     database_url: str = "postgresql+asyncpg://forgejo_mcp:change-me@localhost:5432/forgejo_mcp"
+    database_url_file: Path | None = None
     log_level: str = "INFO"
     log_format: Literal["json", "text"] = "json"
     host: str = "127.0.0.1"
@@ -29,7 +30,10 @@ class Settings(BaseSettings):
     session_ttl_hours: int = Field(default=8, ge=1, le=168)
     cookie_secure: bool | None = None
     allow_insecure_forgejo_http: bool = False
+    allow_unverified_forgejo_tls: bool = False
     trusted_proxy_cidrs: list[str] = Field(default_factory=list)
+    forgejo_allowed_base_urls: list[str] = Field(default_factory=list)
+    migration_allow_private_hosts: bool = False
     mcp_request_max_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, le=16 * 1024 * 1024)
     mcp_allowed_origins: list[str] = Field(default_factory=list)
     commit_max_files: int = Field(default=100, ge=1, le=100)
@@ -123,6 +127,35 @@ class Settings(BaseSettings):
                     raise ValueError("production OAuth CIMD origins must use HTTPS")
         return self
 
+    @field_validator("forgejo_allowed_base_urls")
+    @classmethod
+    def validate_forgejo_allowed_base_urls(cls, base_urls: list[str]) -> list[str]:
+        return [_normalize_external_base_url(base_url) for base_url in base_urls]
+
+    @model_validator(mode="after")
+    def require_production_forgejo_allowlist(self) -> "Settings":
+        if self.database_url_file is not None:
+            try:
+                database_url = self.database_url_file.read_text(encoding="utf-8").strip()
+            except OSError as error:
+                raise ValueError("unable to read FMCP_DATABASE_URL_FILE") from error
+            if not database_url or len(database_url) > 4096:
+                raise ValueError("FMCP_DATABASE_URL_FILE is empty or too large")
+            self.database_url = database_url
+        if self.environment == "production" and not self.forgejo_allowed_base_urls:
+            raise ValueError("production requires FMCP_FORGEJO_ALLOWED_BASE_URLS")
+        return self
+
+    def permits_forgejo_base_url(self, base_url: str) -> bool:
+        """Enforce the deployment pin at every PAT-bearing network boundary."""
+        if not self.forgejo_allowed_base_urls:
+            return False
+        try:
+            normalized = _normalize_external_base_url(base_url)
+        except ValueError:
+            return False
+        return normalized in self.forgejo_allowed_base_urls
+
     @property
     def use_secure_cookies(self) -> bool:
         if self.cookie_secure is not None:
@@ -186,3 +219,23 @@ def _normalize_oauth_url(value: str, label: str) -> str:
         raise ValueError(f"{label} must be a credential-free HTTP URL")
     path = parsed.path.rstrip("/")
     return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, "", ""))
+
+
+def _normalize_external_base_url(value: str) -> str:
+    try:
+        parsed = urlsplit(value.strip())
+        _ = parsed.port
+    except ValueError as error:
+        raise ValueError("Forgejo allowed base URLs must be valid HTTP URLs") from error
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Forgejo allowed base URLs must be credential-free HTTP URLs")
+    return urlunsplit(
+        (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/"), "", "")
+    )

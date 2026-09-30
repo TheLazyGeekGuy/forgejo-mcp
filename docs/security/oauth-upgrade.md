@@ -70,7 +70,8 @@ FMCP_TEST_BROWSER=1 FMCP_TEST_DATABASE_URL="$TEST_DATABASE_URL" \
 `FMCP_TEST_CHROMIUM_EXECUTABLE` can select an existing Chromium binary. CI installs
 Chromium and enables these tests alongside the PostgreSQL suite.
 
-This standalone PR includes the Origin, proxy-IP, throttling and log-redaction
-helpers required to expose OAuth safely. Those shared boundaries overlap the
-security-hardening PR; it does not include Forgejo URL/path hardening, deployment
-secret-file changes, password UI, compatibility changes or performance batching.
+The OAuth branch is integrated with the current `main` security and compatibility
+changes. Existing installations must also follow `docs/security/upgrade-hardening.md`
+for database secret files and trusted Forgejo destinations. The supported Forgejo
+version is 16.0.3; 16.0.2 remains a comparison baseline only. Shared Origin, proxy-IP,
+throttling and log-redaction protections remain enabled alongside OAuth.

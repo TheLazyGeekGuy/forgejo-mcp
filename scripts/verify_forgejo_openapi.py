@@ -26,14 +26,16 @@ def verify(source: str, contract_path: Path) -> None:
     contract = json.loads(contract_path.read_text(encoding="utf-8"))
     spec, raw = load_json(source)
     actual_version = spec.get("info", {}).get("version")
-    expected_version = contract["forgejo_version"]
-    if actual_version != expected_version:
+    verified_versions = contract["verified_versions"]
+    version_contract = verified_versions.get(actual_version)
+    if version_contract is None:
         raise ValueError(
-            f"Forgejo version mismatch: expected {expected_version}, got {actual_version}"
+            "Forgejo version mismatch: expected one of the verified contracts "
+            f"{', '.join(sorted(verified_versions))}, got {actual_version}"
         )
 
     actual_hash = hashlib.sha256(raw).hexdigest()
-    expected_hash = contract["swagger_sha256"]
+    expected_hash = version_contract["swagger_sha256"]
     if actual_hash != expected_hash:
         raise ValueError(
             f"Forgejo OpenAPI checksum mismatch: expected {expected_hash}, got {actual_hash}"

@@ -2,9 +2,9 @@
 
 [繁體中文版](getting-started.zh-TW.md)
 
-This guide starts the v0.1.0 Docker Compose deployment from a source checkout. It runs the Forgejo MCP App, built-in Dashboard and PostgreSQL. An existing Forgejo instance is required for normal use.
+This guide starts the current Docker Compose deployment from a source checkout. It runs the Forgejo MCP App, built-in Dashboard and PostgreSQL. An existing Forgejo instance is required for normal use.
 
-> v0.1.0 is an early self-hosted open-source release and is not yet fully production-ready. Read the [known limitations](known-limitations.md) before production use or exposure outside a protected environment.
+> The current source deployment is an early self-hosted release and is not yet fully production-ready. Read the [version compatibility matrix](compatibility.md) and [known limitations](known-limitations.md) before production use or exposure outside a protected environment.
 
 ## 1. Prerequisites
 
@@ -15,11 +15,15 @@ Install:
 - OpenSSL;
 - a shell capable of running the commands below.
 
-You also need an existing Forgejo instance compatible with the locked Forgejo 16.0.2 API contract. The App container must be able to reach its HTTPS API URL.
+You also need an existing Forgejo 16.0.3 instance compatible with the locked API contract. Forgejo 16.0.2 is a comparison baseline, not a supported deployment target for the current source. The App container must be able to reach the Forgejo HTTPS API URL.
 
 Run every command in this guide from the repository root.
 
 ## 2. Create the deployment configuration
+
+These steps are for a **new installation only**. For an existing installation,
+follow the [security hardening upgrade guide](security/upgrade-hardening.md) instead; do not overwrite
+its configuration or regenerate its secrets.
 
 Copy the example environment file:
 
@@ -27,11 +31,10 @@ Copy the example environment file:
 cp deploy/compose.example.env deploy/.env
 ```
 
-Open `deploy/.env` and replace `POSTGRES_PASSWORD` with a long random value. A hexadecimal value avoids URL-encoding ambiguity:
-
-```bash
-openssl rand -hex 32
-```
+Before starting, edit `deploy/.env` and replace `FMCP_FORGEJO_ALLOWED_BASE_URLS`
+with the exact URL of your Forgejo instance; `git.example.com` is only a placeholder.
+The secret-generation commands below assume `POSTGRES_USER` and `POSTGRES_DB` are
+both `forgejo_mcp`; use matching values in `database_url` if you change them.
 
 For direct access through `http://127.0.0.1:8000`, keep:
 
@@ -46,14 +49,23 @@ Do not commit `deploy/.env`.
 ## 3. Generate the required secrets
 
 ```bash
+umask 077
 mkdir -p deploy/secrets
 openssl rand -base64 32 > deploy/secrets/admin_password
 openssl rand -base64 32 > deploy/secrets/credential_key
-chmod 600 deploy/secrets/admin_password deploy/secrets/credential_key
+postgres_password="$(openssl rand -hex 32)"
+printf '%s\n' "$postgres_password" > deploy/secrets/postgres_password
+printf 'postgresql+asyncpg://forgejo_mcp:%s@postgres:5432/forgejo_mcp\n' \
+  "$postgres_password" > deploy/secrets/database_url
+unset postgres_password
+chmod 600 deploy/secrets/admin_password deploy/secrets/credential_key \
+  deploy/secrets/postgres_password deploy/secrets/database_url
 ```
 
 - `admin_password` is the initial Dashboard administrator password.
 - `credential_key` encrypts stored Forgejo PATs.
+- `postgres_password` is read by PostgreSQL through `POSTGRES_PASSWORD_FILE`.
+- `database_url` is staged for the unprivileged App without exposing it through Docker environment inspection.
 
 Do not commit, share or casually replace these files. Replacing the credential key makes existing encrypted PATs unusable. The container stages the read-only secret mounts and then runs the application as the unprivileged `app` user.
 
@@ -108,7 +120,9 @@ In the Dashboard:
 3. enable the required tools globally;
 4. create and invite users.
 
-Use an HTTPS base URL without embedded credentials, a query string or a fragment. The App verifies Forgejo through `/api/v1/version`. Continue with the [administrator guide](admin-guide.md).
+Use an HTTPS base URL without embedded credentials, a query string or a fragment. The App verifies Forgejo through `/api/v1/version`. Signed-in-only Forgejo instances are supported through a bounded, same-origin login-page version fallback that sends no PAT. Continue with the [administrator guide](admin-guide.md).
+
+Before starting a production deployment, set `FMCP_FORGEJO_ALLOWED_BASE_URLS` in `deploy/.env` to a JSON list containing this exact URL. The value is an out-of-band security boundary, not a discovery list.
 
 ## 8. Stop or restart
 
@@ -160,10 +174,6 @@ This profile starts a local Forgejo service but does not represent a supported c
 
 ## Common startup problems
 
-### Compose reports that `POSTGRES_PASSWORD` is not set
-
-Ensure the command includes `--env-file deploy/.env` and that the value is present and non-empty.
-
 ### A secret mount fails
 
 Confirm that these files exist:
@@ -171,9 +181,11 @@ Confirm that these files exist:
 ```text
 deploy/secrets/admin_password
 deploy/secrets/credential_key
+deploy/secrets/database_url
+deploy/secrets/postgres_password
 ```
 
-If custom absolute paths are configured with `FMCP_ADMIN_PASSWORD_FILE` or `FMCP_CREDENTIAL_KEY_FILE`, ensure Docker can read them.
+If custom absolute secret paths are configured in `deploy/.env`, ensure Docker can read them.
 
 ### Port 8000 or 5433 is already in use
 

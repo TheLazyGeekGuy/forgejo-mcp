@@ -42,9 +42,11 @@ On first sign-in:
 3. change the password immediately;
 4. keep the secret file protected and out of source control.
 
+After bootstrap, any authenticated account can change its password from the **Change password** button in the Dashboard header. The new password must contain at least 12 characters. A successful change keeps the current session and revokes every other active session for that account.
+
 ## 2. Configure the Forgejo instance
 
-Enter the company Forgejo base URL in the Dashboard. Forgejo MCP normalizes the URL and verifies `/api/v1/version` before saving it.
+Enter the company Forgejo base URL in the Dashboard. Forgejo MCP normalizes the URL and verifies `/api/v1/version` before saving it. If Forgejo is configured to allow API calls only for signed-in users, the App accepts only Forgejo's exact signed-in-only response and derives the advertised version from the same-origin login page without sending a PAT. Redirects remain disabled and the response is size bounded.
 
 For normal deployments:
 
@@ -55,7 +57,7 @@ For normal deployments:
 
 HTTP is supported only for the local test profile when explicitly enabled.
 
-v0.1.0 is contract-tested against Forgejo `16.0.2+gitea-1.22.0`. See [Known limitations](known-limitations.md) before connecting another version.
+The current source supports Forgejo `16.0.3+gitea-1.22.0`. Forgejo 16.0.2 remains a comparison baseline only. See the [version compatibility matrix](compatibility.md) before connecting another version.
 
 ## 3. Configure global tools
 
@@ -141,6 +143,6 @@ Disabling a user revokes active local sessions and prevents their MCP tokens fro
 
 Logs are JSON by default and include request, user and invocation correlation fields. They must not be treated as a secret store.
 
-## v0.1.0 deployment status
+## Deployment status
 
-v0.1.0 is a self-hosted open-source release whose production deployment capabilities are not yet complete. Operators remain responsible for TLS termination and infrastructure operations; backup/restore automation and production incident runbooks are not included. Review [Known limitations](known-limitations.md) before production use.
+Forgejo MCP is a self-hosted open-source release whose production deployment capabilities are not yet complete. Operators remain responsible for TLS termination and infrastructure operations; backup/restore automation and production incident runbooks are not included. Review [Known limitations](known-limitations.md) before production use.

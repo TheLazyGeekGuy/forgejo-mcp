@@ -4,6 +4,10 @@ Optional [OAuth authorization](docs/security/oauth-2.1.md) is disabled by defaul
 Read the [upgrade and rollback notes](docs/security/oauth-upgrade.md) before enabling it.
 For Claude/OpenAI connection failures, see [edge troubleshooting](docs/oauth-client-edge-troubleshooting.md).
 
+The current `main` branch requires Forgejo 16.0.3. Forgejo 16.0.2 is retained only as a comparison baseline; see the [version compatibility matrix](docs/compatibility.md).
+
+Upgrading an existing installation? Read the [security upgrade instructions](docs/security/upgrade-hardening.md).
+
 [繁體中文](README.zh-TW.md)
 
 Maintainers: [versioned Docker image and GitHub Release workflow](docs/releasing.md).
@@ -12,7 +16,7 @@ Forgejo MCP is a self-hosted [Model Context Protocol](https://modelcontextprotoc
 
 Users connect with their own scoped Forgejo personal access tokens (PATs). Administrators decide which MCP tools are enabled globally, available to each user and granted to each show-once MCP token.
 
-> **v0.1.0 is the initial open-source release.** The core workflow is tested locally against Forgejo 16.0.2, while some production deployment capabilities are not yet complete. Review the [known limitations](docs/known-limitations.md) before production use.
+> **v0.1.0 is the initial open-source release and supports Forgejo 16.0.2.** The v0.2.0 release line and current `main` support Forgejo 16.0.3 and include deployment security changes. Review the [compatibility matrix](docs/compatibility.md), [upgrade guide](docs/security/upgrade-hardening.md) and [known limitations](docs/known-limitations.md) before production use.
 
 ## What it provides
 
@@ -49,7 +53,7 @@ Forgejo MCP does not replace Forgejo authorization. A tool is available only whe
 
 ## Requirements
 
-- An existing Forgejo instance compatible with the locked Forgejo 16.0.2 API contract
+- An existing Forgejo 16.0.3 instance compatible with the locked API contract for the current `main` branch
 - Docker Engine with Docker Compose
 - OpenSSL for generating local secrets
 
@@ -57,16 +61,28 @@ The supported v0.1.0 deployment builds the React Dashboard into the App image an
 
 ## Quick start
 
+**New installations only.** For an existing deployment, follow the [upgrade guide](docs/security/upgrade-hardening.md); do not regenerate its database password or encryption key.
+
 From the repository root:
 
 ```bash
 cp deploy/compose.example.env deploy/.env
-# Edit deploy/.env and replace POSTGRES_PASSWORD before continuing.
+```
 
+Before starting, edit `deploy/.env`: replace `FMCP_FORGEJO_ALLOWED_BASE_URLS` with your exact Forgejo base URL, not the `git.example.com` placeholder. Use `FMCP_COOKIE_SECURE=true` behind production HTTPS; `false` is only for direct localhost HTTP. The commands below assume the default `POSTGRES_USER` and `POSTGRES_DB` (`forgejo_mcp`); if changed, use matching values in `database_url`.
+
+```bash
+umask 077
 mkdir -p deploy/secrets
 openssl rand -base64 32 > deploy/secrets/admin_password
 openssl rand -base64 32 > deploy/secrets/credential_key
-chmod 600 deploy/secrets/admin_password deploy/secrets/credential_key
+postgres_password="$(openssl rand -hex 32)"
+printf '%s\n' "$postgres_password" > deploy/secrets/postgres_password
+printf 'postgresql+asyncpg://forgejo_mcp:%s@postgres:5432/forgejo_mcp\n' \
+  "$postgres_password" > deploy/secrets/database_url
+unset postgres_password
+chmod 600 deploy/secrets/admin_password deploy/secrets/credential_key \
+  deploy/secrets/postgres_password deploy/secrets/database_url
 
 docker compose --env-file deploy/.env -f deploy/compose.yaml up --build -d
 ```
@@ -84,6 +100,8 @@ Open <http://127.0.0.1:8000> and sign in with:
 - Password: the value in `deploy/secrets/admin_password`
 
 Change the bootstrap password immediately. Direct localhost HTTP requires `FMCP_COOKIE_SECURE=false`; secure cookies should remain enabled behind HTTPS.
+
+Production startup also requires `FMCP_FORGEJO_ALLOWED_BASE_URLS`, a JSON list containing the exact trusted Forgejo base URL (for example `["https://git.example.com"]`). This out-of-band pin prevents a Dashboard administrator from redirecting user PAT verification to another server. Browser-based MCP clients must add their exact origins to `FMCP_MCP_ALLOWED_ORIGINS`; regular MCP clients do not send an `Origin` header.
 
 For logs, shutdown, clean reset, common startup errors and the optional local Forgejo profile, see [Getting started](docs/getting-started.md).
 
@@ -122,9 +140,11 @@ The MCP token is shown only once. Store it in the client's secret storage; query
 | Configure Forgejo, users and permissions | [Administrator guide](docs/admin-guide.md) |
 | Create a PAT and MCP token | [User guide](docs/user-guide.md) |
 | Connect an MCP client | [MCP client configuration](docs/mcp-client-configuration.md) |
+| Check MCP and Forgejo version support | [Version compatibility](docs/compatibility.md) |
 | Review current constraints | [Known limitations](docs/known-limitations.md) |
 | Inspect tool inputs and behavior | [v1 tool catalog](docs/tools/v1-tool-catalog.md) |
 | Review credential handling | [Credential security](docs/security/credentials.md) |
+| Review Forgejo 16.0.3 evidence | [Forgejo 16.0.3 compatibility report](docs/forgejo-16.0.3-compatibility.md) |
 
 ## Development and verification
 
@@ -132,6 +152,12 @@ Run the disposable full-stack App/PostgreSQL/Forgejo E2E test:
 
 ```bash
 ./scripts/test-full-docker-e2e.sh
+```
+
+The default development image is Forgejo 16.0.3. Re-run the same complete E2E against the 16.0.2 compatibility baseline with:
+
+```bash
+FORGEJO_IMAGE=data.forgejo.org/forgejo/forgejo:16.0.2-rootless ./scripts/test-full-docker-e2e.sh
 ```
 
 Run the individual quality checks:
@@ -146,7 +172,7 @@ npm run typecheck --prefix frontend
 npm run build --prefix frontend
 ```
 
-Forgejo is pinned to `codeberg.org/forgejo/forgejo:16.0.2-rootless`. The test Forgejo image uses the official primary registry by default. The runner separately uses `data.forgejo.org/forgejo/runner:13`, as documented by Forgejo; it is not assumed to exist on Codeberg. If the Forgejo primary registry is unavailable, explicitly select its official mirror without changing image versions:
+Forgejo defaults to `codeberg.org/forgejo/forgejo:16.0.3-rootless`. The test Forgejo image uses the official primary registry by default. The runner separately uses `data.forgejo.org/forgejo/runner:13`, as documented by Forgejo; it is not assumed to exist on Codeberg. If the Forgejo primary registry is unavailable, explicitly select its official mirror without changing image versions:
 
 ```bash
 FORGEJO_IMAGE_REGISTRY=data.forgejo.org ./scripts/test-full-docker-e2e.sh
@@ -154,11 +180,19 @@ FORGEJO_IMAGE_REGISTRY=data.forgejo.org ./scripts/test-full-docker-e2e.sh
 
 `FORGEJO_RUNNER_IMAGE_REGISTRY` independently overrides the runner registry (default: `data.forgejo.org`).
 
-Verify another instance's Swagger contract with:
+`FORGEJO_IMAGE` overrides the complete Forgejo image reference and takes precedence over the registry setting. The supported 16.0.3 contract and the 16.0.2 comparison baseline both have locked Swagger checksums. Verify either known contract with:
 
 ```bash
 uv run python scripts/verify_forgejo_openapi.py https://forgejo.example/swagger.v1.json
 ```
+
+Launch the supported release and comparison baseline to reproduce the complete Swagger comparison with:
+
+```bash
+./scripts/test-forgejo-openapi-compatibility.sh
+```
+
+The integration and full-stack suites negotiate MCP Streamable HTTP protocol version `2025-06-18` explicitly.
 
 ## License
 

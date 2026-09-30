@@ -22,6 +22,40 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 - Accept public-client revocation requests without `client_secret`.
 - Preserve omitted authorization redirect URIs through code exchange (migration 0013); add PostgreSQL and Chromium regression coverage.
 
+## [0.2.0] - 2026-09-09
+
+### Compatibility
+
+- Raise the minimum and only supported deployment target to Forgejo `16.0.3+gitea-1.22.0`; Forgejo 16.0.2 remains a comparative CI baseline and is not supported by this release.
+- Lock the official 16.0.3 Swagger checksum. The only schema difference from 16.0.2 affects unused `IssueMeta` required fields, with no registered endpoint impact.
+- Add a versioned compatibility matrix in `docs/compatibility.md` and a detailed Forgejo 16.0.3 report in `docs/forgejo-16.0.3-compatibility.md`.
+
+### Added
+
+- Add pull-request and release CI coverage for the OpenAPI comparison and complete Docker E2E against Forgejo 16.0.3 and the retained 16.0.2 baseline.
+- Add E2E coverage for repository search and repository webhook create/list operations.
+- Add a Dashboard password-change control that keeps the current session and revokes the account's other active sessions.
+- Support version discovery for Forgejo instances that require sign-in for API version requests, using a bounded same-origin fallback without sending a PAT.
+
+### Changed
+
+- Change the default development Forgejo image from `16.0.2-rootless` to `16.0.3-rootless`.
+- Replace broad E2E Forgejo PATs with the explicit scope set `read:user`, `write:organization`, `write:repository` and `write:issue`.
+- Make MCP `2025-06-18` negotiation explicit in integration and Docker E2E coverage.
+
+### Security
+
+- Pin Forgejo destinations, validate remote/path inputs, bound decompression, redact credentials, serialize invitation acceptance and harden browser/proxy boundaries.
+- Move Compose database credentials into protected files and require explicit trusted Forgejo destinations; see `docs/security/upgrade-hardening.md`.
+- Preserve the existing token lifecycle and add targeted regression tests. No OAuth routes or migrations are included.
+- Update `nanoid` to 3.3.18, `cryptography` to 50.0.1 and the development test stack to patched pytest 9 releases; current npm and Python dependency audits report no known vulnerabilities.
+
+### Deployment and upgrade notes
+
+- Existing installations must follow `docs/security/upgrade-hardening.md`; do not regenerate their PostgreSQL password or credential encryption key.
+- This release requires new database credential files and trusted Forgejo URL configuration, but adds no database migration.
+- Back up PostgreSQL, Compose configuration and credential encryption secrets before upgrading. Rollback requires the matching image and configuration; do not delete or recreate database data.
+
 ## [0.1.0] - 2026-09-08
 
 ### Compatibility

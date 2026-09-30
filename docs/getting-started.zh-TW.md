@@ -2,9 +2,9 @@
 
 [English](getting-started.md)
 
-本指南說明如何從 source checkout 啟動 v0.1.0 Docker Compose deployment。這套 deployment 會執行 Forgejo MCP App、內建 Dashboard 與 PostgreSQL；一般使用情境需要既有的 Forgejo instance。
+本指南說明如何從 source checkout 啟動目前的 Docker Compose deployment。這套 deployment 會執行 Forgejo MCP App、內建 Dashboard 與 PostgreSQL；一般使用情境需要既有的 Forgejo instance。
 
-> v0.1.0 是早期的 self-hosted 開源版本，尚未完整達到 production-ready。正式使用或暴露至受保護網路以外的環境前，請先閱讀[已知限制](known-limitations.zh-TW.md)。
+> 目前的 source deployment 是早期的 self-hosted 開源版本，尚未完整達到 production-ready。正式使用或暴露至受保護網路以外的環境前，請先閱讀[版本相容性矩陣](compatibility.zh-TW.md)與[已知限制](known-limitations.zh-TW.md)。
 
 ## 1. 系統需求
 
@@ -15,11 +15,14 @@
 - OpenSSL；
 - 可以執行下列 command 的 shell。
 
-你也需要符合已鎖定 Forgejo 16.0.2 API contract 的既有 Forgejo instance，而且 App container 必須能連到其 HTTPS API URL。
+你也需要符合已鎖定 API contract 的 Forgejo 16.0.3 instance。Forgejo 16.0.2 是 comparison baseline，不是目前 source 正式支援的部署目標；App container 必須能連到 Forgejo HTTPS API URL。
 
 本指南的所有 command 都應在 repository 根目錄執行。
 
 ## 2. 建立部署設定
+
+以下僅適用於**全新安裝**。既有部署請改依[安全加固升級指南](security/upgrade-hardening.zh-TW.md)
+操作，不要覆寫原有設定或重新產生 secrets。
 
 複製環境變數範例：
 
@@ -27,11 +30,9 @@
 cp deploy/compose.example.env deploy/.env
 ```
 
-開啟 `deploy/.env`，將 `POSTGRES_PASSWORD` 換成長度足夠的隨機值。使用 hexadecimal value 可以避免 URL encoding 歧義：
-
-```bash
-openssl rand -hex 32
-```
+啟動前先編輯 `deploy/.env`，將 `FMCP_FORGEJO_ALLOWED_BASE_URLS` 改成實際 Forgejo URL；
+`git.example.com` 只是範例值。下列 secrets 產生指令假設 `POSTGRES_USER` 與
+`POSTGRES_DB` 都是 `forgejo_mcp`；若有更動，`database_url` 也必須使用相同值。
 
 如果直接透過 `http://127.0.0.1:8000` 存取，請維持：
 
@@ -46,14 +47,23 @@ App 位於 HTTPS 後方時應改成 `true`。一般部署應維持 `FMCP_ALLOW_I
 ## 3. 產生必要 secrets
 
 ```bash
+umask 077
 mkdir -p deploy/secrets
 openssl rand -base64 32 > deploy/secrets/admin_password
 openssl rand -base64 32 > deploy/secrets/credential_key
-chmod 600 deploy/secrets/admin_password deploy/secrets/credential_key
+postgres_password="$(openssl rand -hex 32)"
+printf '%s\n' "$postgres_password" > deploy/secrets/postgres_password
+printf 'postgresql+asyncpg://forgejo_mcp:%s@postgres:5432/forgejo_mcp\n' \
+  "$postgres_password" > deploy/secrets/database_url
+unset postgres_password
+chmod 600 deploy/secrets/admin_password deploy/secrets/credential_key \
+  deploy/secrets/postgres_password deploy/secrets/database_url
 ```
 
 - `admin_password` 是 Dashboard 管理員的初始密碼。
 - `credential_key` 用來加密儲存的 Forgejo PAT。
+- `postgres_password` 由 PostgreSQL 透過 `POSTGRES_PASSWORD_FILE` 讀取。
+- `database_url` 會安全地提供給非特權 App，且不會出現在 Docker environment inspection 中。
 
 請勿提交、分享或隨意替換這些檔案。替換 credential key 之後，既有的加密 PAT 將無法使用。Container 會先處理唯讀 secret mounts，接著以非特權 `app` user 執行應用程式。
 
@@ -108,7 +118,9 @@ Bootstrap username 預設為 `admin`；若已在 `deploy/.env` 修改 `FMCP_BOOT
 3. 全域啟用需要的工具；
 4. 建立並邀請使用者。
 
-請使用不包含 credential、query string 或 fragment 的 HTTPS base URL。App 會透過 `/api/v1/version` 驗證 Forgejo。後續請參閱[管理員指南](admin-guide.zh-TW.md)。
+請使用不包含 credential、query string 或 fragment 的 HTTPS base URL。App 會透過 `/api/v1/version` 驗證 Forgejo。若 Forgejo 只允許登入使用者查詢 API，App 會使用有大小限制的 same-origin login-page fallback 取得版本，且不會傳送 PAT。後續請參閱[管理員指南](admin-guide.zh-TW.md)。
+
+啟動 production deployment 前，請在 `deploy/.env` 將 `FMCP_FORGEJO_ALLOWED_BASE_URLS` 設為包含此精確 URL 的 JSON 清單。這是由部署管理的安全邊界，不是用於自動探測的清單。
 
 ## 8. 停止或重新啟動
 
@@ -160,10 +172,6 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml --profile test-forg
 
 ## 常見啟動問題
 
-### Compose 顯示未設定 `POSTGRES_PASSWORD`
-
-確認 command 包含 `--env-file deploy/.env`，而且該變數存在且不是空值。
-
 ### Secret mount 失敗
 
 確認下列檔案存在：
@@ -171,9 +179,11 @@ docker compose --env-file deploy/.env -f deploy/compose.yaml --profile test-forg
 ```text
 deploy/secrets/admin_password
 deploy/secrets/credential_key
+deploy/secrets/database_url
+deploy/secrets/postgres_password
 ```
 
-若透過 `FMCP_ADMIN_PASSWORD_FILE` 或 `FMCP_CREDENTIAL_KEY_FILE` 設定自訂 absolute path，請確認 Docker 可以讀取。
+若在 `deploy/.env` 中設定自訂 secret absolute path，請確認 Docker 可以讀取。
 
 ### Port 8000 或 5433 已被使用
 
