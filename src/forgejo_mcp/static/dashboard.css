@@ -101,6 +101,11 @@ button.danger { color: #8c2f2f; background: #f8e6e6; }
 .badge-succeeded { color: #315d40; background: #e4f2e6; }
 .badge-failed, .badge-denied { color: #8c2f2f; background: #f8e6e6; }
 /* Server-rendered OAuth pages use the same auth card and form components. */
+.oauthConsent { max-width: 56rem; width: min(100%, 56rem); }
+.oauthTools { min-width: 0; margin: 0; padding: 0; border: 0; }
+.oauthTools legend { font-weight: 700; }
+.oauthTools .description { max-width: none; margin: 0.75rem 0 1rem; font-size: 0.95rem; }
+.oauthTools .toolChoice span { overflow-wrap: anywhere; }
 .oauthDetails { margin: 1.5rem 0; overflow-wrap: anywhere; }
 .oauthDetails dt { color: #405048; font-weight: 650; }
 .oauthDetails dd { margin: 0 0 0.75rem; color: #526159; }

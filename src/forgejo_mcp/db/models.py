@@ -283,6 +283,7 @@ class OAuthAuthorizationCode(Base):
     )
     code_challenge: Mapped[str] = mapped_column(String(128))
     scopes: Mapped[list[str]] = mapped_column(JSON)
+    tool_names: Mapped[list[str]] = mapped_column(JSON, default=list, server_default=text("'[]'"))
     resource: Mapped[str] = mapped_column(String(2048))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     refresh_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

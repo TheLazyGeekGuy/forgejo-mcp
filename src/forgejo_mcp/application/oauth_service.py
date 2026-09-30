@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import logging
 import re
 import socket
 import uuid
@@ -64,6 +65,7 @@ from forgejo_mcp.db.models import (
 SessionFactoryProvider = Callable[[], async_sessionmaker[AsyncSession]]
 AddressResolver = Callable[[str, int], set[str]]
 OAUTH_SCOPE = "mcp:tools"
+logger = logging.getLogger(__name__)
 _PKCE_PATTERN = re.compile(r"[A-Za-z0-9_-]{43,128}\Z")
 _REFRESH_RECOVERY_CACHE_MAX_ENTRIES = 1024
 
@@ -260,6 +262,10 @@ class OAuthService(
                 return error.reason
         return None
 
+    async def consent_tool_names(self, user_id: uuid.UUID) -> tuple[str, ...]:
+        async with self.session_factory_provider()() as session:
+            return tuple(sorted(await self._effective_tool_names(session, user_id)))
+
     async def _require_consent_ready(self, session: AsyncSession, user_id: uuid.UUID) -> None:
         user = await session.get(User, user_id)
         if user is None or user.status != RecordStatus.ACTIVE:
@@ -283,6 +289,7 @@ class OAuthService(
         account_id: uuid.UUID,
         approve: bool,
         grant_ttl_days: int | None = None,
+        tool_names: list[str] | None = None,
     ) -> str:
         if not _valid_interaction_format(interaction):
             raise ConsentUnavailable("request_expired")
@@ -331,6 +338,11 @@ class OAuthService(
                 )
 
             await self._require_consent_ready(session, account.user_id)
+            selected_tools = set(tool_names or [])
+            if not selected_tools:
+                raise ConsentUnavailable("tools_selection_required")
+            if not selected_tools <= await self._effective_tool_names(session, account.user_id):
+                raise ConsentUnavailable("tools_selection_invalid")
             assert selected_grant_ttl_days is not None
             refresh_expires_at = now + timedelta(days=selected_grant_ttl_days)
             code = new_oauth_code()
@@ -343,6 +355,7 @@ class OAuthService(
                     redirect_uri_provided_explicitly=record.redirect_uri_provided_explicitly,
                     code_challenge=record.code_challenge,
                     scopes=record.scopes,
+                    tool_names=sorted(selected_tools),
                     resource=record.resource,
                     expires_at=now
                     + timedelta(seconds=self.settings.oauth_authorization_code_ttl_seconds),
@@ -357,6 +370,7 @@ class OAuthService(
                     target_id=str(client.id),
                     details={
                         "scopes": record.scopes,
+                        "tool_names": sorted(selected_tools),
                         "grant_expires_at": refresh_expires_at.isoformat(),
                     },
                 )
@@ -441,6 +455,7 @@ class OAuthService(
                 resource=record.resource,
                 family_id=family_id,
                 refresh_expires_at=refresh_expires_at,
+                selected_tool_names=set(record.tool_names),
             )
             await session.commit()
             return token
@@ -562,6 +577,19 @@ class OAuthService(
                 await self._revoke_family(session, record.family_id, now)
                 await session.commit()
                 raise TokenError("invalid_grant", "refresh token reuse was detected")
+            # Rotate only the previous token's grants. Admin changes or new tools
+            # must never expand a connection beyond the user's original selection.
+            selected_tool_names = (
+                set(
+                    await session.scalars(
+                        select(McpTokenToolGrant.tool_name).where(
+                            McpTokenToolGrant.mcp_token_id == record.mcp_token_id,
+                        )
+                    )
+                )
+                if record.mcp_token_id is not None
+                else set()
+            )
             record.rotated_at = now
             if record.mcp_token_id is not None:
                 await self._revoke_mcp_token(session, record.mcp_token_id, now)
@@ -573,6 +601,7 @@ class OAuthService(
                 resource=record.resource,
                 family_id=record.family_id,
                 refresh_expires_at=record.expires_at,
+                selected_tool_names=selected_tool_names,
             )
             await session.commit()
             recovery.token = token.model_copy(deep=True)
@@ -679,11 +708,16 @@ class OAuthService(
         resource: str,
         family_id: uuid.UUID,
         refresh_expires_at: datetime,
+        selected_tool_names: set[str],
     ) -> OAuthToken:
         await self._require_authorizable_user(session, user_id)
-        tool_names = await self._effective_tool_names(session, user_id)
+        tool_names = selected_tool_names & await self._effective_tool_names(session, user_id)
         if not tool_names:
-            raise TokenError("invalid_grant", "user has no effective MCP tools")
+            logger.warning(
+                "oauth_token_issue_rejected",
+                extra={"reason": "no_selected_tools_available", "user_id": str(user_id)},
+            )
+            raise TokenError("invalid_grant", "no selected MCP tools remain available")
         now = datetime.now(UTC)
         access_expires_at = min(
             now + timedelta(seconds=self.settings.oauth_access_token_ttl_seconds),

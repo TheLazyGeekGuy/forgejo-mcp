@@ -13,6 +13,7 @@ The format is based on Keep a Changelog, and this project follows Semantic Versi
 - Opt-in OAuth authorization with PKCE S256, dynamic registration, bounded consent lifetimes and rotating opaque refresh tokens.
 - Transactional family revocation, historical backfill and PostgreSQL concurrency/lifecycle tests; see `docs/security/oauth-upgrade.md` before applying migrations 0009–0012.
 - Claude/OpenAI edge troubleshooting covering discovery, registration, token exchange and Cloudflare bot challenges.
+- OAuth consent tool selection alongside authorization duration; persist selections through code exchange and refresh without permission expansion (migration 0014).
 
 ### Fixed
 

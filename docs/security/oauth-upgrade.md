@@ -12,12 +12,25 @@ at 0011 without interpreting healthy access-token rotation as family revocation.
 Migration 0013 records whether each authorization request explicitly supplied its
 redirect URI. Legacy requests/codes default to `true` to retain their strict
 exchange behavior; newly created requests preserve the actual presence flag.
+Migration 0014 persists the user's explicit consent tool selection. Outstanding
+pre-upgrade authorization codes have an empty selection and cannot be exchanged:
+restart consent in the MCP client. Existing access/refresh tokens remain usable;
+rotation preserves their existing stored token grants rather than granting all
+currently available tools.
 
 Configure an HTTPS issuer origin and resource equal to that origin plus `/mcp`.
 Register only required browser origins; CIMD metadata destinations are separately
 allowlisted. Native loopback callbacks and PKCE S256 are supported. Clients renew
 short-lived access tokens using rotating refresh tokens until the consent grant's
 absolute expiry (choices bounded by administrator policy, maximum 90 days).
+After signing in, the user chooses that duration and selects at least one tool on
+the consent page. No tools are preselected. Only globally enabled tools inside the
+admin-defined user allowance appear. The authorization code stores that exact
+selection; token exchange intersects it with current permissions. Each refresh
+intersects the previous token's grants with current permissions, preserving token
+permission tightening and never adding newly enabled/allowed tools or extending
+the original expiry. A removed tool requires new consent to restore it. If no
+selected tools remain available, exchange/refresh fails closed.
 
 The bounded recovery cache is process-local: use a single application process.
 Within grace a retry gets the same pair, not another branch; a cold-cache retry

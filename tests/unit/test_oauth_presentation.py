@@ -42,13 +42,17 @@ def test_consent_uses_shared_card_and_keeps_safety_details():
         username="<user>",
         grant_ttl_options_days=(1, 7, 30),
         default_grant_ttl_days=30,
+        tool_names=("<tool>",),
     )
-    assert "class='card authCard'" in body
+    assert "class='card authCard oauthConsent'" in body
     assert "class='form'" in body
     assert "OAuth cannot add permissions" in body
     assert "value='approve'" in body and "value='deny'" in body
     assert "&lt;client&gt;" in body and "&lt;user&gt;" in body
     assert "&lt;x&gt;" in body
+    assert "name='tool_names' value='&lt;tool&gt;'" in body
+    assert "checked" not in body
+    assert "Nothing is selected by default" in body
 
 
 @pytest.mark.parametrize(

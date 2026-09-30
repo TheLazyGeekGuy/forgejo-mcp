@@ -143,6 +143,13 @@ def test_consent_cross_origin_callback_in_chromium(action):
                         login.value.request.headers.get("origin"),
                     )
                     page.get_by_role("heading", name="Authorize MCP access?").wait_for()
+                    tools = page.locator('input[name="tool_names"]')
+                    assert tools.count() == 18
+                    assert page.locator('input[name="tool_names"]:checked').count() == 0
+                    if action == "approve":
+                        page.locator('select[name="grant_ttl_days"]').select_option("7")
+                        tools.first.check()
+                    # Deny must work with no tools selected.
                     with page.expect_navigation():
                         page.locator(f'button[value="{action}"]').click()
                     assert page.url.startswith(redirect_uri + "?")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import hmac
 import logging
 import secrets
@@ -35,6 +36,7 @@ from forgejo_mcp.auth.session import CSRF_COOKIE, get_current_session
 from forgejo_mcp.auth.tokens import hash_token, new_token
 from forgejo_mcp.config import Settings, normalize_http_origin
 from forgejo_mcp.db.models import AccountRole, RecordStatus
+from forgejo_mcp.tools.registry import get_tool
 
 OAUTH_CSRF_COOKIE = "fmcp_oauth_csrf"
 _oauth_login_limiter = LoginRateLimiter()
@@ -224,6 +226,7 @@ def create_oauth_routes(service: OAuthService, settings: Settings) -> list[Route
                         username=current.account.username,
                         grant_ttl_options_days=details.grant_ttl_options_days,
                         default_grant_ttl_days=details.default_grant_ttl_days,
+                        tool_names=await service.consent_tool_names(current.account.user_id),
                     )
                 )
         response.set_cookie(
@@ -305,6 +308,12 @@ def create_oauth_routes(service: OAuthService, settings: Settings) -> list[Route
                 400,
             )
         grant_ttl_days = int(grant_ttl_value) if action == "approve" else None
+        submitted_tools = form.getlist("tool_names") if action == "approve" else []
+        if len(submitted_tools) > 100 or any(
+            not isinstance(name, str) or not name or len(name) > 100 for name in submitted_tools
+        ):
+            return _consent_guidance("tools_selection_invalid", interaction=interaction)
+        tool_names = cast(list[str], submitted_tools)
         if not csrf_cookie or not csrf or not hmac.compare_digest(csrf_cookie, csrf):
             return _oauth_html(_message_page("Request rejected", "CSRF validation failed."), 403)
         if session_token is None:
@@ -325,9 +334,10 @@ def create_oauth_routes(service: OAuthService, settings: Settings) -> list[Route
                     account_id=current.account_id,
                     approve=action == "approve",
                     grant_ttl_days=grant_ttl_days,
+                    tool_names=tool_names,
                 )
             except ConsentUnavailable as error:
-                return _consent_guidance(error.reason)
+                return _consent_guidance(error.reason, interaction=interaction)
             except (ValueError, RegistrationError, TokenError) as error:
                 # Do not render SDK descriptions, request values or secrets.
                 logger.warning(
@@ -339,6 +349,7 @@ def create_oauth_routes(service: OAuthService, settings: Settings) -> list[Route
                         "Authorization could not be completed",
                         "Choose one of the offered authorization durations. If the request is "
                         "no longer available, start a new connection from your MCP client.",
+                        retry_interaction=interaction,
                     ),
                     400,
                 )
@@ -440,7 +451,7 @@ def _oauth_html(content: str, status_code: int = 200) -> HTMLResponse:
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<title>Forgejo MCP authorization</title>"
-        "<link rel='stylesheet' href='/oauth/styles.css'></head>"
+        f"<link rel='stylesheet' href='/oauth/styles.css?v={_OAUTH_CSS_VERSION}'></head>"
         f"<body><main class='shell'>{content}</main></body></html>",
         status_code=status_code,
         headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
@@ -489,6 +500,7 @@ def _consent_page(
     username: str,
     grant_ttl_options_days: tuple[int, ...],
     default_grant_ttl_days: int,
+    tool_names: tuple[str, ...],
 ) -> str:
     lifetime_options = "".join(
         "<option value='{days}'{selected}>{days} day{suffix}</option>".format(
@@ -498,8 +510,10 @@ def _consent_page(
         )
         for days in grant_ttl_options_days
     )
+    tool_options = "".join(_tool_choice(name) for name in tool_names)
     return (
-        "<section class='card authCard'><p class='eyebrow'>Forgejo MCP · Secure authorization</p>"
+        "<section class='card authCard oauthConsent'>"
+        "<p class='eyebrow'>Forgejo MCP · Secure authorization</p>"
         "<h1>Authorize MCP access?</h1>"
         f"<p class='description'><strong>{escape(client_name)}</strong> wants to connect as "
         f"<strong>{escape(username)}</strong>.</p>"
@@ -513,20 +527,45 @@ def _consent_page(
         f"<input type='hidden' name='csrf' value='{escape(csrf)}'>"
         "<label>Authorization duration"
         f"<select name='grant_ttl_days' required>{lifetime_options}</select></label>"
+        "<fieldset class='oauthTools'><legend>Token tool permissions</legend>"
+        "<p class='description'>Choose at least one tool for this connection. Nothing is "
+        "selected by default. Only tools enabled and allowed by your administrator appear; "
+        "your Forgejo PAT may further limit access.</p>"
+        f"<div class='tokenToolGrid'>{tool_options}</div></fieldset>"
         "<div class='actions'><button type='submit' name='action' "
         "value='approve'>Authorize</button>"
         "<button class='secondary' type='submit' name='action' value='deny'>Deny</button>"
         "</div></form><p class='description'>Short-lived access tokens are refreshed "
         "automatically until the selected authorization expiry. You can revoke this connection "
-        "in the Dashboard's MCP tokens section at any time. Deny returns to your MCP client "
+        "in the Dashboard's MCP tokens section at any time. Refresh will not add unselected "
+        "tools or extend the chosen authorization duration. Deny returns to your MCP client "
         "without granting access.</p></section>"
     )
 
 
-def _message_page(title: str, message: str) -> str:
+def _tool_choice(name: str) -> str:
+    spec = get_tool(name)
+    title = spec.title if spec else name
+    description = spec.description if spec else ""
+    risk = spec.risk if spec else "unknown"
+    return (
+        "<label class='toolChoice'>"
+        f"<input type='checkbox' name='tool_names' value='{escape(name, quote=True)}'>"
+        f"<span><strong>{escape(title)}</strong><small>{escape(name)} · {escape(risk)}</small>"
+        f"<small>{escape(description)}</small></span></label>"
+    )
+
+
+def _message_page(title: str, message: str, *, retry_interaction: str | None = None) -> str:
+    retry = (
+        f"<p><a href='{escape('/oauth/consent?request=' + retry_interaction, quote=True)}'>"
+        "Return to authorization settings</a></p>"
+        if retry_interaction
+        else ""
+    )
     return (
         "<section class='card authCard'><p class='eyebrow'>Forgejo MCP · Secure authorization</p>"
-        f"<h1>{escape(title)}</h1><p class='description' role='alert'>{escape(message)}</p>"
+        f"<h1>{escape(title)}</h1><p class='description' role='alert'>{escape(message)}</p>{retry}"
         "<p><a href='/'>Return to the Dashboard</a></p>"
         "<p class='description'>After completing setup, return to your MCP client and start "
         "authorization again. In Pi, run <code>/mcp-auth forgejo-local-oauth</code> for the "
@@ -536,8 +575,24 @@ def _message_page(title: str, message: str) -> str:
     )
 
 
-def _consent_guidance(reason: str, status_code: int = 400) -> HTMLResponse:
+def _consent_guidance(
+    reason: str,
+    status_code: int = 400,
+    *,
+    interaction: str | None = None,
+) -> HTMLResponse:
     guidance = {
+        "tools_selection_required": (
+            "Select tools for this token",
+            "Choose at least one tool on the authorization settings page, "
+            "then submit again. No access has been granted.",
+        ),
+        "tools_selection_invalid": (
+            "Tool selection is no longer available",
+            "One or more selected tools are not allowed or enabled for your user. "
+            "Return to authorization settings to reload the available tools and choose again. "
+            "No access has been granted.",
+        ),
         "credential_required": (
             "Set up your Forgejo credential",
             "Your Dashboard account does not have an active, verified Forgejo PAT. "
@@ -583,8 +638,12 @@ def _consent_guidance(reason: str, status_code: int = 400) -> HTMLResponse:
     logger.warning(
         "oauth_consent_rejected", extra={"reason": reason if reason in guidance else "unknown"}
     )
-    return _oauth_html(_message_page(title, message), status_code)
+    retry = (
+        interaction if reason in {"tools_selection_required", "tools_selection_invalid"} else None
+    )
+    return _oauth_html(_message_page(title, message, retry_interaction=retry), status_code)
 
 
 # One stylesheet is packaged for both the Vite Dashboard and backend OAuth pages.
 _OAUTH_CSS = files("forgejo_mcp").joinpath("static/dashboard.css").read_text(encoding="utf-8")
+_OAUTH_CSS_VERSION = hashlib.sha256(_OAUTH_CSS.encode()).hexdigest()[:12]

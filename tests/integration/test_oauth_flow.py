@@ -231,6 +231,7 @@ def approve_authorization(
     *,
     login: bool,
     grant_ttl_days: int = 30,
+    tool_names: list[str] | None = None,
 ) -> str:
     response = client.get("/oauth/consent", params={"request": interaction})
     assert response.status_code == 200
@@ -315,6 +316,7 @@ def approve_authorization(
             "action": "approve",
             "csrf": csrf,
             "grant_ttl_days": str(grant_ttl_days),
+            "tool_names": sorted(READ_TOOLS) if tool_names is None else tool_names,
         },
         follow_redirects=False,
     )
