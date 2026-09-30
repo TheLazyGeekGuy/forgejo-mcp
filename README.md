@@ -146,7 +146,15 @@ npm run typecheck --prefix frontend
 npm run build --prefix frontend
 ```
 
-Forgejo is pinned to the official mirror `data.forgejo.org/forgejo/forgejo:16.0.2-rootless`. Verify another instance's Swagger contract with:
+Forgejo is pinned to `codeberg.org/forgejo/forgejo:16.0.2-rootless`. The test Forgejo image uses the official primary registry by default. The runner separately uses `data.forgejo.org/forgejo/runner:13`, as documented by Forgejo; it is not assumed to exist on Codeberg. If the Forgejo primary registry is unavailable, explicitly select its official mirror without changing image versions:
+
+```bash
+FORGEJO_IMAGE_REGISTRY=data.forgejo.org ./scripts/test-full-docker-e2e.sh
+```
+
+`FORGEJO_RUNNER_IMAGE_REGISTRY` independently overrides the runner registry (default: `data.forgejo.org`).
+
+Verify another instance's Swagger contract with:
 
 ```bash
 uv run python scripts/verify_forgejo_openapi.py https://forgejo.example/swagger.v1.json
